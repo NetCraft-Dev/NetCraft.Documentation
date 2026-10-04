@@ -1,26 +1,26 @@
-# NetCraft-ModApi Reference
+# NetCraft-ModApi-Referenz
 
-`NetCraft.ModApi` is the API surface NetCraft exposes to mods. It has two identities: for you it is an API library; for itself it is an ordinary mod (`id` is `netcraft-modapi`, shipping its own `ncmod.json` and injection probes).
+`NetCraft.ModApi` ist die API-Oberfläche, die NetCraft für Mods bereitstellt. Sie hat zwei Identitäten: für dich ist sie eine API-Bibliothek; für sich selbst ist sie ein gewöhnlicher Mod (`id` ist `netcraft-modapi`, der seine eigene `ncmod.json` und Injektions-Probes mitbringt).
 
-This file grows as the API grows. For architectural background, differences from Fabric, and how to write a mod, see [modding-guide.md](modding-guide.md).
+Diese Datei wächst mit der API. Für architektonischen Hintergrund, Unterschiede zu Fabric und das Schreiben eines Mods siehe [modding-guide-de.md](modding-guide-de.md).
 
 - Assembly: `NetCraft.ModApi.dll`
 
-- Dependencies: `NetCraft` (the main library), `NetCraft.Game`
+- Abhängigkeiten: `NetCraft` (die Hauptbibliothek), `NetCraft.Game`
 
-The public surface is split into three namespaces:
+Die öffentliche Schnittstelle ist in drei Namespaces aufgeteilt:
 
-| Namespace | Contents | Notes |
+| Namespace | Inhalt | Hinweise |
 | --- | --- | --- |
-| `NetCraft.ModApi.Wrapper` | Event and subscription base class `NcEvent<T>`, `Nc*` facades, `Nc*` object handles | Wrapper layer; no kernel types on the public surface |
-| `NetCraft.ModApi.Extension` | `[Inject]` / `[Mixin]` annotations | Extension points; rules bind to kernel class and method names |
-| `NetCraft.ModApi.Internal` | Injection probes | Do not reference directly |
+| `NetCraft.ModApi.Wrapper` | Event- und Abonnement-Basisklasse `NcEvent<T>`, `Nc*`-Fassaden, `Nc*`-Objekthandles | Wrapper-Schicht; keine Kernel-Typen in der öffentlichen Schnittstelle |
+| `NetCraft.ModApi.Extension` | `[Inject]`- / `[Mixin]`-Annotationen | Erweiterungspunkte; Regeln binden an Kernel-Klassen- und -Methodennamen |
+| `NetCraft.ModApi.Internal` | Injektions-Probes | Nicht direkt referenzieren |
 
-The root namespace `NetCraft.ModApi` contains only the entry class `ModApiEntry`. `Wrapper` and `Extension` are two parallel routes; for how to choose, see [modding-guide.md 2.9](modding-guide.md#29-two-routes-wrapper-layer-and-extension-points).
+Der Wurzel-Namespace `NetCraft.ModApi` enthält nur die Einstiegsklasse `ModApiEntry`. `Wrapper` und `Extension` sind zwei parallele Routen; wie man wählt, steht in [modding-guide-de.md 2.9](modding-guide-de.md#29-zwei-routen-wrapper-schicht-und-erweiterungspunkte).
 
 ***
 
-## 1. Quick start
+## 1. Schnellstart
 
 ```csharp
 using NetCraft.ModApi.Wrapper;
@@ -29,7 +29,7 @@ public sealed class MyModEntry
 {
     public Task Init()
     {
-        //subscription returns a handle; disposing it unregisters
+        //das Abonnement gibt ein Handle zurück; das Verwerfen hebt die Registrierung auf
         var handle = ServerEvents.Tick.Subscribe(args =>
             Log.Info($"tick {args.TickCount}"));
 
@@ -38,7 +38,7 @@ public sealed class MyModEntry
                 builder.Executes(context =>
                 {
                     context.GetSource().SendSuccess("hi");
-                    handle.Dispose();          //you can also do something else with the handle
+                    handle.Dispose();          //du kannst mit dem Handle auch etwas anderes tun
                     return 1;
                 })));
 
@@ -47,240 +47,240 @@ public sealed class MyModEntry
 }
 ```
 
-In `ncmod.json`, point `entry` at this class and leave `hooks` empty — the events below are all provided by ModApi's own probes.
+Richte in `ncmod.json` `entry` auf diese Klasse und lasse `hooks` leer — die untenstehenden Events werden alle von ModApis eigenen Probes bereitgestellt.
 
 ***
 
 ## 2. Events
 
-All events live under `NetCraft.ModApi.Wrapper`; after `using NetCraft.ModApi.Wrapper;` they are available.
+Alle Events liegen unter `NetCraft.ModApi.Wrapper`; nach `using NetCraft.ModApi.Wrapper;` stehen sie zur Verfügung.
 
-### 2.1 Summary table
+### 2.1 Übersichtstabelle
 
-| Event                           | Args type              | Trigger                                                   | Side   | ModApi hook point                                        |
+| Event                           | Args-Typ               | Auslöser                                                  | Seite  | ModApi-Hook-Punkt                                        |
 | ------------------------------- | ---------------------- | --------------------------------------------------------- | ------ | -------------------------------------------------------- |
-| `ServerEvents.Tick`             | `ServerTickArgs`       | every tick of the server main loop                        | server | `DedicatedServer::Tick` (Mark)                           |
-| `ServerEvents.Started`          | `ServerPhaseArgs`      | main loop started, after `Done (x.xxxs)!` is printed      | server | `MinecraftServer::Run` (Mark)                            |
-| `ServerEvents.Stopping`         | `ServerPhaseArgs`      | server begins shutting down; players are about to be disconnected | server | `DedicatedServer::Stop` (Mark)                    |
-| `ServerEvents.CommandRegister`  | `CommandRegisterArgs`  | all built-in commands have been registered                | server | `EffectCommand::Register` call site (CallSite)           |
-| `ServerEvents.PlayerJoin`       | `PlayerJoinArgs`       | the join packet sequence has been sent                    | server | `PlayerList::PlaceNewPlayer` call site (CallSite)        |
-| `ServerEvents.PlayerLeave`      | `PlayerLeaveArgs`      | player removed from the online list                       | server | `PlayerList::RemovePlayer` call site (CallSite)          |
-| `ServerEvents.PlayerDisconnect` | `PlayerDisconnectArgs` | disconnect packet sent and connection closed              | server | `ServerPlayer::Disconnect` call site (CallSite)          |
-| `ServerEvents.PlayerHurt`       | `PlayerHurtArgs`       | damage actually dealt                                     | server | `PlayerList::HurtPlayer` call site (CallSite)            |
-| `ServerEvents.PlayerDeath`      | `PlayerDeathArgs`      | immediately after health resets to zero                   | server | `PlayerList::RespawnPlayer` call site (CallSite)         |
-| `ServerEvents.PlayerChat`       | `PlayerChatArgs`       | after the chat broadcast                                  | server | `ServerGamePacketListenerImpl::HandleChat` call site (CallSite) |
-| `ServerEvents.ChunkLoaded`      | `ChunkLoadedArgs`      | chunk enters memory for the first time                    | server | `ServerChunkCache::set_ChunkLoaded` assignment site (CallSite) |
-| `ServerEvents.ChunkUnloaded`    | `ChunkUnloadedArgs`    | chunk leaves memory                                       | server | `ServerChunkCache::set_ChunkUnloaded` assignment site (CallSite) |
-| `ServerEvents.ChunkSaved`       | `ChunkSavedArgs`       | snapshot taken before the chunk is written to disk        | server | `ServerChunkCache::set_ChunkSaveSink` assignment site (CallSite) |
-| `ServerEvents.CommandExecuted`  | `CommandExecutedArgs`  | a command finished running; syntax errors and permission denials count too | server | `CommandManager::Execute` (CallSite) |
-| `ServerEvents.LevelTick`        | `LevelTickArgs`        | level tick, once per loaded level per tick                | server | `PersistentServerLevel::Tick` (CallSite)                 |
-| `ServerEvents.SavedDataSaving`  | `SavedDataSavingArgs`  | saved data written to disk, one step later than chunk saving | server | `SavedDataStorage::ScheduleSave` (CallSite)          |
-| `ServerEvents.BlockChanged`     | `BlockChangedArgs`     | block state changed, about to sync to clients             | server | `IBlockUpdateSink::BlockChanged` (CallSite)              |
-| `ServerEvents.BlockBroken`      | `BlockBrokenArgs`      | block broken; player mining and redstone self-destruction both count | server | `ServerBlockUpdates::BreakBlock` (CallSite) |
-| `ServerEvents.ItemDropped`      | `ItemDroppedArgs`      | dropped item entity spawned, including block-break drops and cooking products | server | `ServerBlockUpdates::SpawnDrop` (CallSite) |
-| `NetworkEvents.PacketReceived`  | `PacketReceivedArgs`   | every inbound packet queued to a handler, including handshake and status phases | both   | `PacketProcessor::ScheduleIfPossible` and `HandleNow` (CallSite) |
-| `ClientEvents.Tick`             | `ClientTickArgs`       | every tick of the client main loop                        | client | `MinecraftClient::Tick` (Mark)                           |
+| `ServerEvents.Tick`             | `ServerTickArgs`       | jeder Tick der Server-Hauptschleife                       | server | `DedicatedServer::Tick` (Mark)                           |
+| `ServerEvents.Started`          | `ServerPhaseArgs`      | Hauptschleife gestartet, nachdem `Done (x.xxxs)!` ausgegeben wurde | server | `MinecraftServer::Run` (Mark)                    |
+| `ServerEvents.Stopping`         | `ServerPhaseArgs`      | Server beginnt herunterzufahren; Spieler werden gleich getrennt | server | `DedicatedServer::Stop` (Mark)                     |
+| `ServerEvents.CommandRegister`  | `CommandRegisterArgs`  | alle eingebauten Befehle wurden registriert               | server | `EffectCommand::Register`-Aufrufstelle (CallSite)        |
+| `ServerEvents.PlayerJoin`       | `PlayerJoinArgs`       | die Beitritts-Paketsequenz wurde gesendet                 | server | `PlayerList::PlaceNewPlayer`-Aufrufstelle (CallSite)     |
+| `ServerEvents.PlayerLeave`      | `PlayerLeaveArgs`      | Spieler aus der Online-Liste entfernt                     | server | `PlayerList::RemovePlayer`-Aufrufstelle (CallSite)       |
+| `ServerEvents.PlayerDisconnect` | `PlayerDisconnectArgs` | Trenn-Paket gesendet und Verbindung geschlossen           | server | `ServerPlayer::Disconnect`-Aufrufstelle (CallSite)       |
+| `ServerEvents.PlayerHurt`       | `PlayerHurtArgs`       | Schaden tatsächlich zugefügt                              | server | `PlayerList::HurtPlayer`-Aufrufstelle (CallSite)         |
+| `ServerEvents.PlayerDeath`      | `PlayerDeathArgs`      | unmittelbar nachdem die Gesundheit auf null zurückgesetzt wird | server | `PlayerList::RespawnPlayer`-Aufrufstelle (CallSite) |
+| `ServerEvents.PlayerChat`       | `PlayerChatArgs`       | nach der Chat-Übertragung                                 | server | `ServerGamePacketListenerImpl::HandleChat`-Aufrufstelle (CallSite) |
+| `ServerEvents.ChunkLoaded`      | `ChunkLoadedArgs`      | Chunk gelangt erstmals in den Speicher                    | server | `ServerChunkCache::set_ChunkLoaded`-Zuweisungsstelle (CallSite) |
+| `ServerEvents.ChunkUnloaded`    | `ChunkUnloadedArgs`    | Chunk verlässt den Speicher                               | server | `ServerChunkCache::set_ChunkUnloaded`-Zuweisungsstelle (CallSite) |
+| `ServerEvents.ChunkSaved`       | `ChunkSavedArgs`       | Snapshot wird erstellt, bevor der Chunk auf die Platte geschrieben wird | server | `ServerChunkCache::set_ChunkSaveSink`-Zuweisungsstelle (CallSite) |
+| `ServerEvents.CommandExecuted`  | `CommandExecutedArgs`  | ein Befehl ist fertig ausgeführt; Syntaxfehler und Berechtigungsverweigerungen zählen ebenfalls | server | `CommandManager::Execute` (CallSite) |
+| `ServerEvents.LevelTick`        | `LevelTickArgs`        | Level-Tick, einmal pro geladenem Level und Tick           | server | `PersistentServerLevel::Tick` (CallSite)                 |
+| `ServerEvents.SavedDataSaving`  | `SavedDataSavingArgs`  | gespeicherte Daten auf die Platte geschrieben, einen Schritt später als das Chunk-Speichern | server | `SavedDataStorage::ScheduleSave` (CallSite) |
+| `ServerEvents.BlockChanged`     | `BlockChangedArgs`     | Blockzustand geändert, wird gleich an Clients synchronisiert | server | `IBlockUpdateSink::BlockChanged` (CallSite)           |
+| `ServerEvents.BlockBroken`      | `BlockBrokenArgs`      | Block abgebaut; Spieler-Abbau und Redstone-Selbstzerstörung zählen beide | server | `ServerBlockUpdates::BreakBlock` (CallSite) |
+| `ServerEvents.ItemDropped`      | `ItemDroppedArgs`      | fallengelassenes Item-Entity erzeugt, einschließlich Block-Abbau-Drops und Kochprodukte | server | `ServerBlockUpdates::SpawnDrop` (CallSite) |
+| `NetworkEvents.PacketReceived`  | `PacketReceivedArgs`   | jedes eingehende Paket, das einem Handler zugeordnet wird, einschließlich Handshake- und Status-Phase | both   | `PacketProcessor::ScheduleIfPossible` und `HandleNow` (CallSite) |
+| `ClientEvents.Tick`             | `ClientTickArgs`       | jeder Tick der Client-Hauptschleife                       | client | `MinecraftClient::Tick` (Mark)                           |
 
-Ordering of player events: death is nested inside the hurt flow, so `PlayerDeath` precedes the corresponding `PlayerHurt`; `PlayerLeave` and `PlayerDisconnect` are two different things — the former means removal from the online list (even after `/kick` it only fires once the connection drops), the latter means the connection drop itself, and the two are not guaranteed to appear in pairs.
+Reihenfolge der Spieler-Events: Der Tod ist in den Hurt-Ablauf eingebettet, daher geht `PlayerDeath` dem zugehörigen `PlayerHurt` voraus; `PlayerLeave` und `PlayerDisconnect` sind zwei verschiedene Dinge — Ersteres bedeutet das Entfernen aus der Online-Liste (auch nach `/kick` wird es erst ausgelöst, wenn die Verbindung abbricht), Letzteres bedeutet den Verbindungsabbruch selbst, und die beiden treten nicht garantiert paarweise auf.
 
-### 2.2 Subscribing and unregistering
+### 2.2 Abonnieren und die Registrierung aufheben
 
 ```csharp
 IDisposable Subscribe(Action<T> handler)
 ```
 
-- Subscribing to the same event multiple times delivers notifications in subscription order.
+- Mehrfaches Abonnieren desselben Events liefert Benachrichtigungen in der Reihenfolge des Abonnierens.
 
-- Dispatch takes a snapshot of the callback list, so subscribing or unregistering from inside a callback does not affect the current dispatch.
+- Die Verteilung erstellt einen Snapshot der Callback-Liste, daher beeinflusst Abonnieren oder Aufheben der Registrierung innerhalb eines Callbacks die aktuelle Verteilung nicht.
 
-- Without unregistering it stays effective forever; mods provide no unload mechanism, so manual unregistration is usually unnecessary.
+- Ohne Aufhebung der Registrierung bleibt es für immer wirksam; Mods bieten keinen Entlademechanismus, daher ist manuelles Abmelden normalerweise unnötig.
 
-### 2.3 Args types
+### 2.3 Args-Typen
 
 **`ServerTickArgs`**
 
-| Property    | Type   | Notes                                |
+| Eigenschaft | Typ    | Hinweise                             |
 | ----------- | ------ | ------------------------------------ |
-| `TickCount` | `long` | tick count since this launch, starting at 1 |
+| `TickCount` | `long` | Tick-Zähler seit diesem Start, beginnend bei 1 |
 
-Note this is counted by ModApi itself, not the kernel's `TickCount`.
+Beachte, dass dies von ModApi selbst gezählt wird, nicht vom `TickCount` des Kernels.
 
 **`ClientTickArgs`**
 
-| Property    | Type   | Notes                           |
-| ----------- | ------ | ------------------------------- |
-| `TickCount` | `long` | same as above, counted independently on the client side |
+| Eigenschaft | Typ    | Hinweise                           |
+| ----------- | ------ | ---------------------------------- |
+| `TickCount` | `long` | wie oben, auf der Client-Seite unabhängig gezählt |
 
 **`ServerPhaseArgs`**
 
-| Property | Type     | Notes                        |
-| -------- | -------- | ---------------------------- |
-| `Phase`  | `string` | phase name, `started` or `stopping` |
+| Eigenschaft | Typ      | Hinweise                     |
+| ----------- | -------- | ---------------------------- |
+| `Phase`     | `string` | Phasenname, `started` oder `stopping` |
 
-The field duplicates the event itself; it is kept so logging can use one uniform format.
+Das Feld dupliziert das Event selbst; es wird beibehalten, damit die Protokollierung ein einheitliches Format verwenden kann.
 
 **`CommandRegisterArgs`**
 
-| Member                               | Type                                    | Notes            |
+| Mitglied                             | Typ                                     | Hinweise         |
 | ------------------------------------ | --------------------------------------- | ---------------- |
-| `Dispatcher`                         | `CommandDispatcher<CommandSourceStack>` | the kernel's command dispatcher |
-| `Register(name, description, build)` | method                                  | register a command and record it in the ledger, see 3.1 |
+| `Dispatcher`                         | `CommandDispatcher<CommandSourceStack>` | der Befehls-Dispatcher des Kernels |
+| `Register(name, description, build)` | Methode                                 | registriert einen Befehl und trägt ihn ins Register ein, siehe 3.1 |
 
 **`PlayerJoinArgs`**
 
-| Property      | Type           | Notes                                          |
+| Eigenschaft   | Typ            | Hinweise                                       |
 | ------------- | -------------- | ---------------------------------------------- |
-| `Player`      | `ServerPlayer` | the player who just joined; join packets already sent, state is safe to read |
-| `ProfileName` | `string`       | player name                                    |
+| `Player`      | `ServerPlayer` | der gerade beigetretene Spieler; Beitrittspakete bereits gesendet, der Zustand kann sicher gelesen werden |
+| `ProfileName` | `string`       | Spielername                                    |
 
 **`PlayerLeaveArgs`**
 
-| Property  | Type           | Notes                                 |
-| --------- | -------------- | ------------------------------------- |
-| `Player`  | `ServerPlayer` | the leaving player, no longer in the online list at this point |
-| `Removed` | `bool`         | whether actually removed; `false` on repeated removal |
+| Eigenschaft | Typ            | Hinweise                              |
+| ----------- | -------------- | ------------------------------------- |
+| `Player`    | `ServerPlayer` | der verlassende Spieler, zu diesem Zeitpunkt nicht mehr in der Online-Liste |
+| `Removed`   | `bool`         | ob tatsächlich entfernt; `false` beim wiederholten Entfernen |
 
 **`PlayerDisconnectArgs`**
 
-| Property | Type           | Notes                                 |
-| -------- | -------------- | ------------------------------------- |
-| `Player` | `ServerPlayer` | the disconnected player               |
-| `Reason` | `string`       | disconnect reason; plain text when given as a component |
+| Eigenschaft | Typ            | Hinweise                              |
+| ----------- | -------------- | ------------------------------------- |
+| `Player`    | `ServerPlayer` | der getrennte Spieler                 |
+| `Reason`    | `string`       | Trennungsgrund; Klartext, wenn als Komponente angegeben |
 
-The disconnect packet has been sent and the connection closed; sending packets to this player now has no effect.
+Das Trenn-Paket wurde gesendet und die Verbindung geschlossen; das Senden von Paketen an diesen Spieler hat jetzt keine Wirkung.
 
 **`PlayerHurtArgs`**
 
-| Property   | Type            | Notes                                        |
-| ---------- | --------------- | -------------------------------------------- |
-| `Player`   | `ServerPlayer`  | the player who was hurt                      |
-| `Attacker` | `ServerPlayer?` | the player who dealt the damage; `null` for environmental and command damage |
-| `Amount`   | `float`         | damage amount this time                      |
+| Eigenschaft | Typ             | Hinweise                                     |
+| ----------- | --------------- | -------------------------------------------- |
+| `Player`    | `ServerPlayer`  | der Spieler, der verletzt wurde              |
+| `Attacker`  | `ServerPlayer?` | der Spieler, der den Schaden zugefügt hat; `null` bei Umgebungs- und Befehlsschaden |
+| `Amount`    | `float`         | Schadensmenge diesmal                        |
 
-Does not fire during invulnerability frames or after death (the kernel's `Hurt` returns `false`).
+Wird während Unverwundbarkeitsframes oder nach dem Tod nicht ausgelöst (das `Hurt` des Kernels gibt `false` zurück).
 
 **`PlayerDeathArgs`**
 
-| Property   | Type            | Notes                          |
-| ---------- | --------------- | ------------------------------ |
-| `Player`   | `ServerPlayer`  | the player who died            |
-| `Attacker` | `ServerPlayer?` | the killer; `null` when there is none |
+| Eigenschaft | Typ             | Hinweise                       |
+| ----------- | --------------- | ------------------------------ |
+| `Player`    | `ServerPlayer`  | der gestorbene Spieler         |
+| `Attacker`  | `ServerPlayer?` | der Mörder; `null`, wenn keiner vorhanden ist |
 
-The kernel resets immediately after health reaches zero, so when the event fires the player is already at full health at the respawn point; the coordinates and drops at the moment of death are not available.
+Der Kernel setzt unmittelbar zurück, nachdem die Gesundheit null erreicht, daher ist der Spieler beim Auslösen des Events bereits mit voller Gesundheit am Respawn-Punkt; die Koordinaten und Drops im Moment des Todes sind nicht verfügbar.
 
 **`PlayerChatArgs`**
 
-| Property     | Type     | Notes                |
+| Eigenschaft  | Typ      | Hinweise             |
 | ------------ | -------- | -------------------- |
-| `SenderName` | `string` | sender name          |
-| `Message`    | `string` | plain-text message   |
+| `SenderName` | `string` | Name des Absenders   |
+| `Message`    | `string` | Klartextnachricht    |
 
-This event is a **read-only notification**: the original method has already broadcast the message, so changing `Message` here has no effect.
+Dieses Event ist eine **Nur-Lese-Benachrichtigung**: Die Originalmethode hat die Nachricht bereits übertragen, daher hat eine Änderung von `Message` hier keine Wirkung.
 
 **`ChunkLoadedArgs`** **/** **`ChunkUnloadedArgs`** **/** **`ChunkSavedArgs`**
 
-The three events share the same args shape:
+Die drei Events haben dieselbe Args-Form:
 
-| Property | Type  | Notes              |
-| -------- | ----- | ------------------ |
-| `X`      | `int` | chunk coordinate X |
-| `Z`      | `int` | chunk coordinate Z |
+| Eigenschaft | Typ   | Hinweise           |
+| ----------- | ----- | ------------------ |
+| `X`         | `int` | Chunk-Koordinate X |
+| `Z`         | `int` | Chunk-Koordinate Z |
 
-The easiest one to get wrong is `ChunkSaved`: the kernel requires this callback to **take the snapshot synchronously**, while serialization and disk writes are done asynchronously by the kernel itself. So time-consuming work in this callback directly slows down chunk unloading, and destructive operations (removing blocks, changing inventories) should not go here either — it only promises the snapshot moment.
+Am leichtesten falsch zu machen ist `ChunkSaved`: Der Kernel verlangt, dass dieser Callback **den Snapshot synchron erstellt**, während Serialisierung und Schreiben auf die Platte vom Kernel selbst asynchron erledigt werden. Daher verlangsamt zeitaufwändige Arbeit in diesem Callback direkt das Entladen von Chunks, und destruktive Operationen (Blöcke entfernen, Inventare ändern) gehören ebenfalls nicht hierher — er verspricht nur den Moment des Snapshots.
 
-When `ChunkUnloaded` fires the block entities have already been cleaned up along with the chunk; if you want to read blocks, use `ChunkSaved` (which cannot access blocks either) or an earlier point.
+Wenn `ChunkUnloaded` ausgelöst wird, wurden die Block-Entities bereits zusammen mit dem Chunk aufgeräumt; wenn du Blöcke lesen möchtest, verwende `ChunkSaved` (das ebenfalls nicht auf Blöcke zugreifen kann) oder einen früheren Zeitpunkt.
 
 **`CommandExecutedArgs`**
 
-| Property  | Type                   | Notes                                 |
-| --------- | ---------------------- | ------------------------------------- |
-| `Command` | `string`               | raw command text; chat commands carry no leading slash |
-| `Result`  | `int`                  | command return value; 0 means failure or denial |
-| `Source`  | `CommandSourceStack?`  | command source; `null` on the player-overload path |
-| `Player`  | `ServerPlayer?`        | the player who issued the command; `null` when issued from the console |
+| Eigenschaft | Typ                    | Hinweise                              |
+| ----------- | ---------------------- | ------------------------------------- |
+| `Command`   | `string`               | Rohtext des Befehls; Chat-Befehle haben keinen führenden Schrägstrich |
+| `Result`    | `int`                  | Rückgabewert des Befehls; 0 bedeutet Fehler oder Verweigerung |
+| `Source`    | `CommandSourceStack?`  | Befehlsquelle; `null` auf dem Spieler-Overload-Pfad |
+| `Player`    | `ServerPlayer?`        | der Spieler, der den Befehl ausgegeben hat; `null`, wenn von der Konsole ausgegeben |
 
-The event fires **after** the command finishes; it cannot change execution. Syntax errors and permission denials also come through here; use `Result` to tell them apart. Commands a player sends from the chat bar go through the `Execute(ServerPlayer, string)` overload, where the kernel builds the command source internally, so in that case `Source` is `null` and only `Player` is set.
+Das Event wird ausgelöst, **nachdem** der Befehl beendet ist; es kann die Ausführung nicht ändern. Syntaxfehler und Berechtigungsverweigerungen laufen ebenfalls hier durch; verwende `Result`, um sie zu unterscheiden. Befehle, die ein Spieler über die Chatleiste sendet, durchlaufen den Overload `Execute(ServerPlayer, string)`, bei dem der Kernel die Befehlsquelle intern aufbaut, sodass in diesem Fall `Source` `null` ist und nur `Player` gesetzt ist.
 
 **`LevelTickArgs`**
 
-| Property       | Type                    | Notes                                        |
+| Eigenschaft    | Typ                     | Hinweise                                     |
 | -------------- | ----------------------- | -------------------------------------------- |
-| `Level`        | `NcLevel`               | the level advanced this tick                 |
-| `RunsNormally` | `bool`                  | whether it advanced normally; `false` during `/tick freeze` |
+| `Level`        | `NcLevel`               | das in diesem Tick fortgeschrittene Level    |
+| `RunsNormally` | `bool`                  | ob es normal fortgeschritten ist; `false` während `/tick freeze` |
 
-Fires once per loaded level per tick, so a multi-level world receives several per tick. The trigger point is after the level tick **has completed**; it is an observation point, not an interception point.
+Wird einmal pro geladenem Level und Tick ausgelöst, daher erhält eine Welt mit mehreren Levels mehrere pro Tick. Der Auslösepunkt liegt, nachdem der Level-Tick **abgeschlossen ist**; er ist ein Beobachtungspunkt, kein Abfangpunkt.
 
 **`SavedDataSavingArgs`**
 
-| Property  | Type                | Notes                       |
-| --------- | ------------------- | --------------------------- |
-| `Storage` | `SavedDataStorage`  | the saved-data table being persisted |
+| Eigenschaft | Typ                 | Hinweise                    |
+| ----------- | ------------------- | --------------------------- |
+| `Storage`   | `SavedDataStorage`  | die persistierte Tabelle gespeicherter Daten |
 
-This is a different path from `ServerEvents.ChunkSaved`: the chunk one only takes a snapshot and writes asynchronously, whereas this one fires after a synchronous write completes. World clock, game rules, and world border data go through it.
+Dies ist ein anderer Pfad als `ServerEvents.ChunkSaved`: Bei den Chunks wird nur ein Snapshot erstellt und asynchron geschrieben, während dieses Event ausgelöst wird, nachdem ein synchrones Schreiben abgeschlossen ist. Weltuhr, Spielregeln und Weltgrenzen-Daten laufen hierüber.
 
 **`BlockChangedArgs`**
 
-| Property | Type         | Notes                       |
+| Eigenschaft | Typ          | Hinweise                    |
 | -------- | ------------ | --------------------------- |
-| `Pos`    | `BlockPos`   | position of the changed block |
-| `State`  | `BlockState` | block state after the change  |
+| `Pos`    | `BlockPos`   | Position des geänderten Blocks |
+| `State`  | `BlockState` | Blockzustand nach der Änderung  |
 
-The state has already been written to the chunk and is about to sync to clients, so the change itself cannot be modified here. Redstone components changing their own state in behavior callbacks also exit through this path; it is high-frequency, so do not do time-consuming work in the callback.
+Der Zustand wurde bereits in den Chunk geschrieben und wird gleich an Clients synchronisiert, daher kann die Änderung selbst hier nicht modifiziert werden. Redstone-Komponenten, die in Verhaltens-Callbacks ihren eigenen Zustand ändern, gehen ebenfalls über diesen Pfad hinaus; er ist hochfrequent, also verrichte keine zeitaufwändige Arbeit im Callback.
 
 **`BlockBrokenArgs`**
 
-| Property | Type            | Notes                                      |
+| Eigenschaft | Typ             | Hinweise                                   |
 | -------- | --------------- | ------------------------------------------ |
-| `Pos`    | `BlockPos`      | position of the broken block                |
-| `Player` | `ServerPlayer?` | the breaker; `null` for non-player causes such as redstone |
+| `Pos`    | `BlockPos`      | Position des abgebauten Blocks              |
+| `Player` | `ServerPlayer?` | der Abbaucher; `null` bei Nicht-Spieler-Ursachen wie Redstone |
 
-Fires only when the block is actually replaced; empty positions and rejected breaks do not trigger it. Break effects and drops have already been handled, so what you read in the event is the result.
+Wird nur ausgelöst, wenn der Block tatsächlich ersetzt wird; leere Positionen und abgelehnte Abbaumaßnahmen lösen es nicht aus. Abbau-Effekte und Drops wurden bereits behandelt, daher liest du im Event das Ergebnis.
 
 **`ItemDroppedArgs`**
 
-| Property | Type        | Notes                   |
+| Eigenschaft | Typ         | Hinweise                |
 | -------- | ----------- | ----------------------- |
-| `Pos`    | `BlockPos`  | where the dropped item appeared |
-| `Stack`  | `ItemStack` | the dropped item stack   |
+| `Pos`    | `BlockPos`  | wo das fallengelassene Item erschienen ist |
+| `Stack`  | `ItemStack` | der Stapel des fallengelassenen Items |
 
-Block-break drops and campfire cooking products both go through here. An empty item stack spawns no entity, so there is no event.
+Block-Abbau-Drops und Lagerfeuer-Kochprodukte laufen beide hier durch. Ein leerer Item-Stapel erzeugt kein Entity, daher gibt es kein Event.
 
 **`PacketReceivedArgs`**
 
-| Property        | Type     | Notes                    |
+| Eigenschaft     | Typ      | Hinweise                 |
 | --------------- | -------- | ------------------------ |
-| `Listener`      | `object` | the listener receiving this packet |
-| `Packet`        | `object` | the packet object itself  |
-| `IsServerbound` | `bool`   | whether it is a serverbound packet |
+| `Listener`      | `object` | der Listener, der dieses Paket empfängt |
+| `Packet`        | `object` | das Paketobjekt selbst   |
+| `IsServerbound` | `bool`   | ob es ein servergebundenes Paket ist |
 
-Fires for every inbound packet, covering all four phases: handshake, status, configuration, and play. Movement packets arrive several times per tick, so do not do time-consuming work in the callback. The packet is already decoded into an object but has not entered the business layer; to distinguish types, inspect `Packet` yourself. Outbound packets are outside this event's scope.
+Wird für jedes eingehende Paket ausgelöst und deckt alle vier Phasen ab: Handshake, Status, Konfiguration und Play. Bewegungs-Pakete kommen mehrmals pro Tick an, also verrichte keine zeitaufwändige Arbeit im Callback. Das Paket ist bereits in ein Objekt dekodiert, aber noch nicht in die Geschäftsschicht gelangt; um Typen zu unterscheiden, untersuche `Packet` selbst. Ausgehende Pakete liegen außerhalb des Geltungsbereichs dieses Events.
 
 ***
 
-## 3. Extension points
+## 3. Erweiterungspunkte
 
-### 3.1 Command registration
+### 3.1 Befehlsregistrierung
 
-The timing is `ServerEvents.CommandRegister`. Do not cache this event's args; the internal command tree is built only once at startup.
+Der Zeitpunkt ist `ServerEvents.CommandRegister`. Zwischenspeichere die Args dieses Events nicht; der interne Befehlsbaum wird nur einmal beim Start aufgebaut.
 
 ```csharp
 public void Register(
-    string name,                                          //command literal, without the slash
-    string description,                                   //one-line description, shown in the /ncmapi ledger
-    Action<LiteralArgumentBuilder<CommandSourceStack>> build);   //attach arguments and the executor
+    string name,                                          //Befehls-Literal, ohne den Schrägstrich
+    string description,                                   //einzeilige Beschreibung, angezeigt im /ncmapi-Register
+    Action<LiteralArgumentBuilder<CommandSourceStack>> build);   //Argumente und den Executor anhängen
 ```
 
-The `build` you receive is the kernel's brigadier builder; write arguments, subcommands, and permission predicates the kernel's way:
+Das `build`, das du erhältst, ist der Brigadier-Builder des Kernels; schreibe Argumente, Unterbefehle und Berechtigungsprädikate auf die Art des Kernels:
 
 ```csharp
 ServerEvents.CommandRegister.Subscribe(args =>
     args.Register("tpall", "teleport all players to the executor", builder =>
         builder
-            .Requires(s => s.HasPermission(2))            //permission predicate
+            .Requires(s => s.HasPermission(2))            //Berechtigungsprädikat
             .Executes(context => { /* ... */ return 1; })));
 ```
 
-With arguments:
+Mit Argumenten:
 
 ```csharp
 args.Register("heal", "heal the target players", builder =>
@@ -290,22 +290,22 @@ args.Register("heal", "heal the target players", builder =>
             .Executes(context =>
             {
                 foreach (var player in EntityArgument.GetPlayers(context, "targets"))
-                    player.Heal(20f);                     //illustrative
+                    player.Heal(20f);                     //zur Veranschaulichung
                 return 1;
             })));
 ```
 
-Key points:
+Wichtige Punkte:
 
-- Calling `args.Dispatcher.Register(...)` directly also installs a command, but it does not enter the ledger and `/ncmapi` will not show it. Use `args.Register` if you want it listed.
+- Ein direkter Aufruf von `args.Dispatcher.Register(...)` installiert ebenfalls einen Befehl, aber er gelangt nicht ins Register und `/ncmapi` zeigt ihn nicht an. Verwende `args.Register`, wenn du ihn aufgeführt haben möchtest.
 
-- Commands have no permission restriction by default; add `.Requires(...)` yourself if needed.
+- Befehle haben standardmäßig keine Berechtigungsbeschränkung; füge bei Bedarf selbst `.Requires(...)` hinzu.
 
-- The behavior at execution time is entirely up to you; ModApi does not intercept it.
+- Das Verhalten zur Ausführungszeit liegt ganz bei dir; ModApi fängt es nicht ab.
 
-### 3.2 Viewing registered commands
+### 3.2 Registrierte Befehle anzeigen
 
-There is a built-in `/ncmapi`, requiring permission level 2:
+Es gibt ein eingebautes `/ncmapi`, das Berechtigungsstufe 2 erfordert:
 
 ```
 /ncmapi
@@ -318,124 +318,124 @@ Commands registered via NetCraft-ModApi: 2 total
   /heal <targets>
 ```
 
-Usage lines are computed on the fly from the command tree's node structure: literals are written by name, arguments are wrapped in angle brackets, and intermediate nodes that are themselves executable get their own line too.
+Verwendungszeilen werden zur Laufzeit aus der Knotenstruktur des Befehlsbaums berechnet: Literale werden mit Namen geschrieben, Argumente in spitze Klammern gesetzt, und Zwischenknoten, die selbst ausführbar sind, erhalten ihre eigene Zeile.
 
 ***
 
-## 4. Server facades
+## 4. Server-Fassaden
 
-The facades in this chapter all live under `NetCraft.ModApi.Wrapper`; after `using NetCraft.ModApi.Wrapper;` they are available.
+Die Fassaden in diesem Kapitel liegen alle unter `NetCraft.ModApi.Wrapper`; nach `using NetCraft.ModApi.Wrapper;` stehen sie zur Verfügung.
 
-Facades are `Nc*` static classes that gather capabilities scattered across the kernel into a few entry points. The kernel instance is captured by a probe when the main loop starts; when `NcServer.IsAvailable` is false everything below throws — use them only inside event callbacks, not from `Init`.
+Fassaden sind statische `Nc*`-Klassen, die über den Kernel verstreute Fähigkeiten an einigen Einstiegspunkten bündeln. Die Kernel-Instanz wird von einer Probe erfasst, wenn die Hauptschleife startet; wenn `NcServer.IsAvailable` false ist, wirft alles unten — verwende sie nur innerhalb von Event-Callbacks, nicht aus `Init`.
 
-| Facade | Purpose |
+| Fassade | Zweck |
 | --- | --- |
-| `NcServer` | server instance, tick rate, commands, entity tracking, player data, game rules, broadcast, command execution |
-| `NcPlayers` | online player queries and operations (kick, teleport, health, game mode, permissions) |
-| `NcWorld` | overworld block read/write and breaking, weather, time, border, clock, sounds, level events; takes `NcLevel` handles to reach other dimensions, coordinates are plain `x y z` ints |
-| `NcRegistries` | built-in registries looked up by name (blocks, items, fluids, effects, biomes, particles, entities, block entities) |
-| `NcRecipes` | recipe queries (grid crafting, stonecutting, cooking; fetch recipes by id) |
-| `NcLists` | lists and config (whitelist, ops, bans, `server.properties`) |
-| `NcStartup` | startup arguments (kernel-unrecognized tokens and name-based subscription) |
+| `NcServer` | Server-Instanz, Tick-Rate, Befehle, Entity-Tracking, Spielerdaten, Spielregeln, Broadcast, Befehlsausführung |
+| `NcPlayers` | Abfragen und Operationen zu Online-Spielern (Kick, Teleport, Gesundheit, Spielmodus, Berechtigungen) |
+| `NcWorld` | Lesen/Schreiben und Abbauen von Blöcken in der Oberwelt, Wetter, Zeit, Grenze, Uhr, Klänge, Level-Events; nimmt `NcLevel`-Handles, um andere Dimensionen zu erreichen, Koordinaten sind einfache `x y z`-Ganzzahlen |
+| `NcRegistries` | eingebaute Registries, nach Namen nachgeschlagen (Blöcke, Items, Flüssigkeiten, Effekte, Biome, Partikel, Entities, Block-Entities) |
+| `NcRecipes` | Rezeptabfragen (Raster-Crafting, Steinschneiden, Kochen; Rezepte per id abrufen) |
+| `NcLists` | Listen und Konfiguration (Whitelist, Ops, Bans, `server.properties`) |
+| `NcStartup` | Startargumente (vom Kernel nicht erkannte Tokens und namensbasiertes Abonnement) |
 
-`NcPlayer` is not a static facade but an **object handle**: `NcPlayers.All` / `Find` return it, and `Player` / `Attacker` in player events are also it. Handles are read-only and constructed by probes; mods cannot get the kernel's `ServerPlayer` — the first anchor of "no kernel types on the public surface". The same kernel player always maps to the same handle, cached internally by weak reference and automatically invalidated once the player logs off.
+`NcPlayer` ist keine statische Fassade, sondern ein **Objekthandle**: `NcPlayers.All` / `Find` geben es zurück, und `Player` / `Attacker` in Spieler-Events sind ebenfalls es. Handles sind schreibgeschützt und werden von Probes konstruiert; Mods können den `ServerPlayer` des Kernels nicht erhalten — der erste Ankerpunkt für „keine Kernel-Typen in der öffentlichen Schnittstelle". Derselbe Kernel-Spieler wird immer auf dasselbe Handle abgebildet, intern per Weak Reference zwischengespeichert und automatisch ungültig, sobald sich der Spieler abmeldet.
 
-`NcLevel` follows the same shape for levels. `NcWorld.Overworld` / `Nether` / `End` and `NcWorld.Get("minecraft:the_nether")` return it, and `LevelTickArgs.Level` is one too. It carries the dimension id, time, weather, build height, tick count, and chunk force-loading; block operations stay on `NcWorld` and take the handle plus `x y z`. `BlockPos` never shows up, so a mod's dll carries no reference to the kernel level type.
+`NcLevel` folgt derselben Form für Levels. `NcWorld.Overworld` / `Nether` / `End` und `NcWorld.Get("minecraft:the_nether")` geben es zurück, und `LevelTickArgs.Level` ist ebenfalls eines. Es trägt die Dimensions-id, Zeit, Wetter, Bauhöhe, Tick-Zähler und das Zwangsladen von Chunks; Blockoperationen bleiben auf `NcWorld` und nehmen das Handle plus `x y z`. `BlockPos` taucht nie auf, daher trägt die dll eines Mods keine Referenz auf den Level-Typ des Kernels.
 
 ### 4.1 Registries
 
-`NcRegistries` provides both whole tables and lookups by name. Whole tables are for iteration and tag-based lookup; lookups by name are for getting a single element:
+`NcRegistries` bietet sowohl vollständige Tabellen als auch Namensnachschlage. Vollständige Tabellen sind für Iteration und Tag-basiertes Nachschlagen gedacht; Namensnachschlage für das Abrufen eines einzelnen Elements:
 
 ```csharp
-var stone = NcRegistries.FindState("minecraft:stone");     //block default state
+var stone = NcRegistries.FindState("minecraft:stone");     //Standardzustand des Blocks
 var diamond = NcRegistries.FindItem("minecraft:diamond");
 var over = NcRegistries.FindBiome("minecraft:plains");
 
-//iterate the whole table
+//die ganze Tabelle durchlaufen
 foreach (var id in NcRegistries.Blocks.KeySet)
     Log.Info(id.ToString());
 ```
 
-Registries are assembled gradually during startup, and mods load before assembly completes, so do not cache anything looked up in `Init` — assembly is still ongoing, and a cached value will be a null reference or a stale value. Currently `BuiltInRegistries.BootStrap` is still an empty implementation; each registry is populated separately by its own Bootstrap, and the data-driven ones (biomes, recipes, etc.) have very few entries before data pack loading is wired up.
+Registries werden während des Starts schrittweise zusammengesetzt, und Mods werden geladen, bevor die Zusammenstellung abgeschlossen ist, also speichere nichts zwischen, was in `Init` nachgeschlagen wird — die Zusammenstellung läuft noch, und ein zwischengespeicherter Wert ist entweder eine Nullreferenz oder ein veralteter Wert. Derzeit ist `BuiltInRegistries.BootStrap` noch eine leere Implementierung; jede Registry wird separat von ihrem eigenen Bootstrap befüllt, und die datengetriebenen (Biome, Rezepte usw.) haben nur sehr wenige Einträge, bevor das Laden von Datenpaketen verdrahtet ist.
 
-### 4.2 Recipes
+### 4.2 Rezepte
 
-`NcRecipes` is backed by a recipe table loaded from data packs; `/reload` replaces the whole table, so do not hold a `RecipeHolder` across reloads.
+`NcRecipes` wird von einer aus Datenpaketen geladenen Rezepttabelle gestützt; `/reload` ersetzt die ganze Tabelle, also halte einen `RecipeHolder` nicht über Reloads hinweg.
 
 ```csharp
 if (NcRecipes.IsAvailable)
 {
-    var result = NcRecipes.Craft(input);                    //compute the output for a crafting grid
-    var recipes = NcRecipes.StonecuttingFor(stack);         //stonecutting recipes available for this input
-    var smelting = NcRecipes.CookingFor("smelting", stack); //look up by cooking type
-    var byId = NcRecipes.Find("minecraft:oak_planks");      //fetch a recipe by id
+    var result = NcRecipes.Craft(input);                    //die Ausgabe für ein Crafting-Raster berechnen
+    var recipes = NcRecipes.StonecuttingFor(stack);         //für diese Eingabe verfügbare Steinschneide-Rezepte
+    var smelting = NcRecipes.CookingFor("smelting", stack); //nach Kochtyp nachschlagen
+    var byId = NcRecipes.Find("minecraft:oak_planks");      //ein Rezept per id abrufen
 }
 ```
 
 ***
 
-## 5. Internals
+## 5. Interna
 
-You do not need this section to write mods, but it may help when debugging.
+Du brauchst diesen Abschnitt nicht, um Mods zu schreiben, aber er kann beim Debuggen helfen.
 
 ### 5.1 Probes
 
-| Class                                                    | Form        | Responsibility                                              |
+| Klasse                                                   | Form        | Zuständigkeit                                               |
 | -------------------------------------------------------- | ----------- | ----------------------------------------------------------- |
-| `Internal.SignalProbe.OnSignal(string)`                  | Mark ×4     | all "something happened" signals funnel into one method, dispatched to the matching event by `label` |
-| `Internal.CommandProbe.OnCommandsReady(object)`          | CallSite    | replaces the call to `EffectCommand::Register`; after restoring the original call it fires `CommandRegister` |
-| `Internal.PlayerProbe.OnXxx(object, ...)`                | CallSite ×6 | player events, one method per hook point; after restoring the original call it publishes the event |
-| `Internal.LevelProbe.OnChunkXxxAssigned(object, object)` | CallSite ×3 | chunk events, hooked at the assignment sites of `ServerChunkCache`'s three callback properties; a wrapper delegate is layered on before handing control back to the kernel |
-| `Internal.BlockProbe.OnXxx(...)`                         | CallSite ×3 | block events; breaking and drops hook `ServerBlockUpdates`, state changes hook the interface method on `IBlockUpdateSink` |
+| `Internal.SignalProbe.OnSignal(string)`                  | Mark ×4     | alle „etwas ist passiert"-Signale laufen in einer Methode zusammen und werden per `label` an das passende Event verteilt |
+| `Internal.CommandProbe.OnCommandsReady(object)`          | CallSite    | ersetzt den Aufruf von `EffectCommand::Register`; nach Wiederherstellung des Originalaufrufs wird `CommandRegister` ausgelöst |
+| `Internal.PlayerProbe.OnXxx(object, ...)`                | CallSite ×6 | Spieler-Events, eine Methode pro Hook-Punkt; nach Wiederherstellung des Originalaufrufs wird das Event veröffentlicht |
+| `Internal.LevelProbe.OnChunkXxxAssigned(object, object)` | CallSite ×3 | Chunk-Events, gehookt an den Zuweisungsstellen der drei Callback-Eigenschaften von `ServerChunkCache`; ein Wrapper-Delegate wird vorgeschaltet, bevor die Kontrolle an den Kernel zurückgegeben wird |
+| `Internal.BlockProbe.OnXxx(...)`                         | CallSite ×3 | Block-Events; Abbau und Drops hooken `ServerBlockUpdates`, Zustandsänderungen hooken die Schnittstellenmethode auf `IBlockUpdateSink` |
 
-`SignalProbe`'s signature takes only `string`, and the parameters of `CommandProbe`, `PlayerProbe`, and `LevelProbe` are declared as `object` — this is deliberate: during assembly `Lead.Hook` resolves the replacement method's signature, and once a kernel type appears in it, resolving it pulls up the kernel assembly early and injection misses its window. Kernel types appear only inside method bodies, by which time the code is already running.
+Die Signatur von `SignalProbe` nimmt nur `string`, und die Parameter von `CommandProbe`, `PlayerProbe` und `LevelProbe` sind als `object` deklariert — das ist Absicht: Während der Assemblierung löst `Lead.Hook` die Signatur der Ersatzmethode auf, und sobald ein Kernel-Typ darin auftaucht, zieht dessen Auflösung die Kernel-Assembly frühzeitig herauf und die Injektion verpasst ihr Zeitfenster. Kernel-Typen erscheinen nur innerhalb von Methodenkörpern, zu welchem Zeitpunkt der Code bereits läuft.
 
-The only things that cannot be `object` in a signature are value-type parameters and return values: `object` is a reference on the stack while `float`/`bool` are values, and a mismatch is invalid IL. So `PlayerProbe.OnHurtPlayer` keeps `float` for the damage amount, and `OnRemovePlayer` and `OnHurtPlayer` keep `bool` return values.
+Das Einzige, was in einer Signatur nicht `object` sein kann, sind Werttyp-Parameter und Rückgabewerte: `object` ist eine Referenz auf dem Stack, während `float`/`bool` Werte sind, und eine Nichtübereinstimmung ist ungültige IL. Daher behält `PlayerProbe.OnHurtPlayer` `float` für die Schadensmenge, und `OnRemovePlayer` und `OnHurtPlayer` behalten `bool`-Rückgabewerte.
 
-`BlockProbe` is an extension of this constraint: block position and state are the two value types `BlockPos`/`BlockState`, which can only be written into the signature as themselves. These two types come from `NetCraft.Primitives` and `NetCraft.Registry`, neither of which is on the injection list, so resolving them during assembly does not pull up the assemblies to be rewritten early.
+`BlockProbe` ist eine Erweiterung dieser Einschränkung: Blockposition und -zustand sind die beiden Werttypen `BlockPos`/`BlockState`, die nur als sie selbst in die Signatur geschrieben werden können. Diese beiden Typen stammen aus `NetCraft.Primitives` und `NetCraft.Registry`, von denen keiner auf der Injektionsliste steht, daher zieht ihre Auflösung während der Assemblierung die umzuschreibenden Assemblies nicht frühzeitig herauf.
 
-### 5.2 Hook point list
+### 5.2 Liste der Hook-Punkte
 
-ModApi's `ncmod.json` contains twenty-four rules, matching the table in 2.1 one-to-one. To change a hook point or add a rule, edit this file; after editing, rebuild (it is an embedded resource) and put the resulting dll back into `mods/` — the latter is already done automatically by `DeployModToHosts` in `NetCraft.ModApi.csproj`, and missing it manifests as the rules not taking effect at all.
+Die `ncmod.json` von ModApi enthält vierundzwanzig Regeln, die eins zu eins zur Tabelle in 2.1 passen. Um einen Hook-Punkt zu ändern oder eine Regel hinzuzufügen, bearbeite diese Datei; baue nach der Bearbeitung neu (sie ist eine eingebettete Ressource) und lege die resultierende dll zurück in `mods/` — Letzteres erledigt bereits automatisch `DeployModToHosts` in `NetCraft.ModApi.csproj`, und wenn es fehlt, äußert sich das darin, dass die Regeln überhaupt nicht wirksam werden.
 
-`CommandManager::Execute` has two overloads that share one rule. `Lead.Hook`'s CallSite matches call sites by "type + method name", not by parameter list, and both overloads take two parameters, so the probe can take `object` for the first parameter and dispatch by the real type.
+`CommandManager::Execute` hat zwei Overloads, die sich eine Regel teilen. Das CallSite von `Lead.Hook` gleicht Aufrufstellen nach „Typ + Methodenname" ab, nicht nach Parameterliste, und beide Overloads nehmen zwei Parameter, sodass die Probe `object` für den ersten Parameter nehmen und nach dem echten Typ verteilen kann.
 
-The two `PacketProcessor` rules are complementary: play-phase packets go through `ScheduleIfPossible` into the main-thread queue, while handshake and status phases go through `HandleNow` for immediate handling; any given packet passes through only one of them. Hooking only the former misses the handshake and status phases — which happen to be the easiest to probe with scripts, so during debugging this is easily misread as "the rule did not take effect".
+Die beiden `PacketProcessor`-Regeln sind komplementär: Pakete der Play-Phase gehen über `ScheduleIfPossible` in die Hauptthread-Warteschlange, während Handshake- und Status-Phase über `HandleNow` zur sofortigen Verarbeitung laufen; ein gegebenes Paket durchläuft nur eine von beiden. Nur Erstere zu hooken verpasst die Handshake- und Status-Phase — die zufällig am leichtesten mit Skripten zu testen sind, weshalb dies beim Debuggen leicht als „die Regel hat nicht gewirkt" fehlinterpretiert wird.
 
-The three chunk rules hook the **assignment sites** of `ServerChunkCache`'s three callback properties, not the read sites. The reason is that those three properties are unicast and already occupied by the kernel itself when `PersistentServerLevel` is constructed (they inject save and block-entity cleanup logic); a mod assigning directly would override the kernel's copy — unloads not persisted, block entities not cleaned up, and with no error at all. Hooking the assignment site lets the kernel's callback and the probe be chained at that moment; the assignment happens only once, and each subsequent trigger adds one layer of delegate forwarding.
+Die drei Chunk-Regeln hooken die **Zuweisungsstellen** der drei Callback-Eigenschaften von `ServerChunkCache`, nicht die Lesestellen. Der Grund ist, dass diese drei Eigenschaften unicast sind und bereits vom Kernel selbst belegt werden, wenn `PersistentServerLevel` konstruiert wird (sie injizieren Speicher- und Block-Entity-Aufräumlogik); ein Mod, der direkt zuweist, würde die Kopie des Kernels überschreiben — Entladungen nicht persistiert, Block-Entities nicht aufgeräumt, und das ganz ohne Fehler. Die Zuweisungsstelle zu hooken erlaubt es, den Callback des Kernels und die Probe in diesem Moment zu verketten; die Zuweisung geschieht nur einmal, und jeder weitere Auslöser fügt eine Ebene Delegate-Weiterleitung hinzu.
 
-`PlayerList::RespawnPlayer` is private, so the probe cannot restore the original call; that one goes through reflection (called once per death, so the overhead is negligible). This also leaves a door open for kernel alignment: if `InternalsVisibleTo` is added for it in the future, it can be swapped to a direct call.
+`PlayerList::RespawnPlayer` ist privat, daher kann die Probe den Originalaufruf nicht wiederherstellen; dieser läuft über Reflexion (einmal pro Tod aufgerufen, also ist der Overhead vernachlässigbar). Das lässt auch eine Tür für die Angleichung an den Kernel offen: Falls künftig `InternalsVisibleTo` dafür hinzugefügt wird, kann es auf einen direkten Aufruf umgestellt werden.
 
-### 5.3 Ledger
+### 5.3 Register
 
-`Internal.NcCommandRegistry` records commands registered through `args.Register`. It is only a ledger and does not take part in command execution; the commands themselves are installed on the kernel dispatcher, so even if the ledger has problems, the commands still work.
+`Internal.NcCommandRegistry` zeichnet Befehle auf, die über `args.Register` registriert wurden. Es ist nur ein Register und nimmt nicht an der Befehlsausführung teil; die Befehle selbst sind auf dem Kernel-Dispatcher installiert, also funktionieren sie auch dann noch, wenn das Register Probleme hat.
 
 ***
 
-## 6. To be added
+## 6. Noch hinzuzufügen
 
-The following are hook points whose locations are confirmed but that have not yet become events (the list was produced by `__scan_mod_api.py` at the repository root):
+Das Folgende sind Hook-Punkte, deren Positionen bestätigt sind, die aber noch keine Events geworden sind (die Liste wurde von `__scan_mod_api.py` im Repository-Stamm erzeugt):
 
-| Direction         | Candidate hook points                                                        |
+| Richtung          | Kandidaten-Hook-Punkte                                                       |
 | ----------------- | ---------------------------------------------------------------------------- |
 | Entities          | `ClientLevel::AddEntity`, `Entity::Die`                                      |
-| World             | level load and unload, `ServerChunkCache` chunk batching                     |
-| Terrain generation | `ChunkGenerator::Generate` stages per `ChunkStatus`, `WorldGenRegion::SetBlockState` |
-| Command execution | `CommandSourceStack::SendSuccess` / `SendFailure` (the response half, with many call sites) |
-| Network           | per-packet-type `ServerGamePacketListenerImpl::HandleXxx` (currently only a unified entry point) |
+| Welt              | Laden und Entladen von Levels, Chunk-Batching von `ServerChunkCache`         |
+| Geländegenerierung | `ChunkGenerator::Generate`-Stufen pro `ChunkStatus`, `WorldGenRegion::SetBlockState` |
+| Befehlsausführung | `CommandSourceStack::SendSuccess` / `SendFailure` (die Antwort-Hälfte, mit vielen Aufrufstellen) |
+| Netzwerk          | `ServerGamePacketListenerImpl::HandleXxx` pro Pakettyp (derzeit nur ein einheitlicher Einstiegspunkt) |
 
-Directions already done: level ticks became `ServerEvents.LevelTick`, saved data persistence became `ServerEvents.SavedDataSaving`, command execution became `ServerEvents.CommandExecuted`, and blocks became `ServerEvents.BlockChanged` / `BlockBroken` / `ItemDropped`.
+Bereits erledigte Richtungen: Level-Ticks wurden `ServerEvents.LevelTick`, die Persistenz gespeicherter Daten wurde `ServerEvents.SavedDataSaving`, die Befehlsausführung wurde `ServerEvents.CommandExecuted`, und Blöcke wurden `ServerEvents.BlockChanged` / `BlockBroken` / `ItemDropped`.
 
-Hooking the block cell on `SetBlock` does not work: it has two default parameters, `notifyNeighbors` and `strict`, so compiled call sites take anywhere from 4 to 6 parameters, and since CallSite matches by "type + method name" without looking at the parameter list, one replacement method cannot handle all three stack shapes. Instead it hooks two places: state sync hooks `IBlockUpdateSink::BlockChanged` (the only interface call in `ServerLevel.SetBlock`, covering every change with client sync), and breaking and drops hook `ServerBlockUpdates`' own methods.
+Den Block-Bereich auf `SetBlock` zu hooken funktioniert nicht: Er hat zwei Standardparameter, `notifyNeighbors` und `strict`, sodass kompilierte Aufrufstellen zwischen 4 und 6 Parameter annehmen, und da CallSite nach „Typ + Methodenname" abgleicht, ohne die Parameterliste anzusehen, kann eine Ersatzmethode nicht alle drei Stack-Formen bewältigen. Stattdessen werden zwei Stellen gehookt: Die Zustandssynchronisierung hookt `IBlockUpdateSink::BlockChanged` (der einzige Schnittstellenaufruf in `ServerLevel.SetBlock`, der jede Änderung mit Client-Sync abdeckt), und Abbau und Drops hooken die eigenen Methoden von `ServerBlockUpdates`.
 
-The entities cell is troublesome because `Entity` is defined in `NetCraft.Registry`, which is not on the injection list, so call sites that target it cannot be rewritten. `ClientLevel::AddEntity` is in the client assembly and is doable; a death event first requires resolving whether `Registry` can be rewritten.
+Die Entity-Zelle ist problematisch, weil `Entity` in `NetCraft.Registry` definiert ist, das nicht auf der Injektionsliste steht, sodass Aufrufstellen, die es anvisieren, nicht umgeschrieben werden können. `ClientLevel::AddEntity` liegt in der Client-Assembly und ist machbar; ein Todes-Event erfordert zuerst die Klärung, ob `Registry` umgeschrieben werden kann.
 
-For the network cell, `HandleChat` has long existed and `NetworkEvents.PacketReceived` provides a unified entry point, so per-`HandleXxx` hooks are much less valuable; only scenarios needing fine-grained filtering by packet type are worth adding.
+Für die Netzwerk-Zelle existiert `HandleChat` schon lange und `NetworkEvents.PacketReceived` bietet einen einheitlichen Einstiegspunkt, daher sind Hooks pro `HandleXxx` deutlich weniger wertvoll; nur Szenarien, die eine feinkörnige Filterung nach Pakettyp benötigen, lohnen sich hinzuzufügen.
 
-Level load and unload have no convergence point on the NC side: `DedicatedServer::CreateLevel` is private, so the original call can only be restored by reflection like `PlayerList::RespawnPlayer`; the unload path is even more scattered. To do it, first settle what the event args should be.
+Laden und Entladen von Levels haben auf der NC-Seite keinen Konvergenzpunkt: `DedicatedServer::CreateLevel` ist privat, sodass der Originalaufruf nur per Reflexion wiederhergestellt werden kann, wie bei `PlayerList::RespawnPlayer`; der Entladepfad ist noch verstreuter. Um es umzusetzen, muss zuerst geklärt werden, wie die Event-Args aussehen sollen.
 
-All of the remaining ones need object references (entity instances, etc.), so they must use `CallSite` rather than `Mark`; if a kernel value type appears among the parameters, it can only be written into the replacement method's signature as itself.
+Alle verbleibenden benötigen Objektreferenzen (Entity-Instanzen usw.), daher müssen sie `CallSite` statt `Mark` verwenden; wenn ein Kernel-Werttyp unter den Parametern auftaucht, kann er nur als er selbst in die Signatur der Ersatzmethode geschrieben werden.
 
-The interface-surface list (`__modapi_api.txt`, produced by `__scan_mod_api.py --api`) was also reviewed: entries qualified as capability entry points were gathered into the chapter 4 facades by domain, and the rest that are not exposed fall into three categories — protocol and packet handling (`Network.Protocol.*`), rendering and models (`Client.Render.*`), and terrain generation and density functions (`LevelGen.*`). These are kernel internals; using them directly would tie mods to implementation details, so a stable interface should first be opened in the kernel.
+Die Schnittstellenoberflächen-Liste (`__modapi_api.txt`, erzeugt von `__scan_mod_api.py --api`) wurde ebenfalls durchgesehen: Einträge, die sich als Fähigkeits-Einstiegspunkte qualifizierten, wurden nach Domäne in die Fassaden von Kapitel 4 gesammelt, und der Rest, der nicht offengelegt ist, fällt in drei Kategorien — Protokoll- und Paketverarbeitung (`Network.Protocol.*`), Rendering und Modelle (`Client.Render.*`) sowie Geländegenerierung und Dichtefunktionen (`LevelGen.*`). Dies sind Kernel-Interna; sie direkt zu verwenden würde Mods an Implementierungsdetails binden, daher sollte zuerst eine stabile Schnittstelle im Kernel geöffnet werden.
 
-On the server side there are two more things not wrapped as facades: the `ReloadableServerResources` instance hangs off `DedicatedServer`, and since ModApi does not reference `NetCraft.Server`, wrapping it requires first opening a property on the kernel base class; `ChunkSender` and `ServerWorldBorderListener` are internal flows with no use case for mods.
+Auf der Server-Seite gibt es noch zwei Dinge, die nicht als Fassaden verpackt sind: Die `ReloadableServerResources`-Instanz hängt an `DedicatedServer`, und da ModApi nicht auf `NetCraft.Server` verweist, erfordert ihre Verpackung zuerst das Öffnen einer Eigenschaft in der Kernel-Basisklasse; `ChunkSender` und `ServerWorldBorderListener` sind interne Abläufe ohne Anwendungsfall für Mods.

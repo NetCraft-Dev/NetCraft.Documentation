@@ -1,46 +1,46 @@
-# NetCraft mod template
+# NetCraft 모드 템플릿
 
-Sample code for NetCraft mod development. Every entry in `NetCraftTemplate.yaml`
-points at one file under `examples/`, and `ncm template` pulls them on demand.
+NetCraft 모드 개발용 샘플 코드입니다. `NetCraftTemplate.yaml`의 각 항목은
+`examples/` 아래의 파일 하나를 가리키며, `ncm template`이 필요할 때 가져옵니다.
 
-## Usage
+## 사용법
 
 ```
-ncm template view              list every entry
-ncm template view Wrapper.?    filter by id, ? and * are wildcards
-ncm template example <api id>  pull one example file into the current directory
+ncm template view              모든 항목 나열
+ncm template view Wrapper.?    id로 필터링, ?와 *는 와일드카드
+ncm template example <api id>  예제 파일 하나를 현재 디렉터리로 가져오기
 ```
 
-## The two routes
+## 두 가지 경로
 
-`NetCraft.ModApi` exposes two namespaces, pick the one that fits:
+`NetCraft.ModApi`는 두 개의 네임스페이스를 노출하므로 맞는 것을 고르세요:
 
-| Namespace | What you get |
+| 네임스페이스 | 제공하는 것 |
 | --- | --- |
-| `NetCraft.ModApi.Wrapper` | Events, `Nc*` facades and `Nc*` handles. No kernel type shows up in the public surface, so a kernel rename does not force a rebuild of your mod. |
-| `NetCraft.ModApi.Extension` | `[Inject]` and `[Mixin]` attributes. Rules name kernel types and methods directly, which is more powerful and more fragile. |
+| `NetCraft.ModApi.Wrapper` | 이벤트, `Nc*` 파사드, `Nc*` 핸들. 공개 표면에 커널 타입이 나타나지 않으므로 커널 이름이 바뀌어도 모드를 다시 빌드할 필요가 없습니다. |
+| `NetCraft.ModApi.Extension` | `[Inject]`와 `[Mixin]` 애트리뷰트. 규칙이 커널 타입과 메서드를 직접 지정하므로 더 강력하지만 더 취약합니다. |
 
-## Common calls
+## 자주 쓰는 호출
 
-Open this panel from inside a mod project and every call below that your code
-actually uses is graded against `NetCraftTemplate.yaml`: green when the member
-is declared, amber when the member is not, red when the type is not declared
-at all. Hover a highlighted name to see the reason.
+모드 프로젝트 안에서 이 패널을 열면, 아래 호출 중 코드가 실제로 사용하는
+모든 호출이 `NetCraftTemplate.yaml`을 기준으로 채점됩니다. 멤버가 선언되어
+있으면 초록색, 그렇지 않으면 노란색, 타입이 아예 선언되어 있지 않으면
+빨간색입니다. 강조된 이름 위에 마우스를 올리면 이유를 볼 수 있습니다.
 
-| Call | What it does |
+| 호출 | 하는 일 |
 | --- | --- |
-| `NcServer.IsAvailable` | whether the server is up and captured |
-| `NcServer.Broadcast` | system message to everyone online |
-| `NcServer.Execute` | run a command as the console |
-| `NcWorld.GetBlock` | read one block, null when the chunk is unloaded |
-| `NcWorld.SetBlock` | write one block, runs the full update chain |
-| `NcWorld.BreakBlock` | break a block the way a player would |
-| `NcPlayer.Name` | the player name |
-| `NcPlayer.Health` | current health |
-| `NcPlayers.Find` | look up an online player by name |
-| `NcPlayers.Send` | private system message |
-| `NcRegistries.FindState` | block state by namespaced id |
-| `NcRegistries.FindItem` | item by namespaced id |
-| `ServerEvents.Tick` | runs every server tick |
-| `ServerEvents.PlayerJoin` | a player finished joining |
-| `ServerEvents.BlockBroken` | a block was actually replaced |
+| `NcServer.IsAvailable` | 서버가 실행 중이며 캡처되었는지 여부 |
+| `NcServer.Broadcast` | 접속 중인 모든 이에게 보내는 시스템 메시지 |
+| `NcServer.Execute` | 콘솔로서 명령 실행 |
+| `NcWorld.GetBlock` | 블록 하나 읽기, 청크가 언로드되었으면 null |
+| `NcWorld.SetBlock` | 블록 하나 쓰기, 전체 업데이트 체인 실행 |
+| `NcWorld.BreakBlock` | 플레이어가 하는 것처럼 블록 부수기 |
+| `NcPlayer.Name` | 플레이어 이름 |
+| `NcPlayer.Health` | 현재 체력 |
+| `NcPlayers.Find` | 이름으로 접속 중인 플레이어 찾기 |
+| `NcPlayers.Send` | 개인 시스템 메시지 |
+| `NcRegistries.FindState` | 네임스페이스 id로 블록 상태 조회 |
+| `NcRegistries.FindItem` | 네임스페이스 id로 아이템 조회 |
+| `ServerEvents.Tick` | 모든 서버 틱마다 실행 |
+| `ServerEvents.PlayerJoin` | 플레이어가 접속을 완료함 |
+| `ServerEvents.BlockBroken` | 블록이 실제로 교체됨 |

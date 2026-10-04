@@ -1,105 +1,105 @@
-# NetCraft Modding Guide
+# Guide de modding NetCraft
 
 
-Details for individual APIs are not here; see [mod-api.md](mod-api.md).
+Les détails des API individuelles ne sont pas ici ; voir [modapi-fr.md](modapi-fr.md).
 
 ---
 
-## 1. Runtime structure first
+## 1. La structure d'exécution avant tout
 
-### 1.1 Three process entry points
+### 1.1 Trois points d'entrée de processus
 
-NC has three entry points, and the mod injection pipeline is the same for all three:
+NC a trois points d'entrée, et le pipeline d'injection de mods est le même pour les trois :
 
-| Entry | Purpose |
+| Point d'entrée | Rôle |
 | --- | --- |
-| `NetCraft.Loader` | one exe for both sides: `--server` starts the server; `--client` or no mode flag starts the client |
-| `NetCraft.Server.Exe` | standalone server executable |
-| `NetCraft.Client.Exe` | standalone client executable |
+| `NetCraft.Loader` | un seul exe pour les deux côtés : `--server` démarre le serveur ; `--client` ou aucun drapeau de mode démarre le client |
+| `NetCraft.Server.Exe` | exécutable serveur autonome |
+| `NetCraft.Client.Exe` | exécutable client autonome |
 
-`Main` itself is a thin shell that only registers callbacks and hands the work to the next method. Take `NetCraft.Server.Exe`:
+`Main` lui-même n'est qu'une fine enveloppe qui se contente d'enregistrer des callbacks et confie le travail à la méthode suivante. Prenons `NetCraft.Server.Exe` :
 
 ```csharp
 public static int Main(string[] args)
 {
-    EmbeddedAssemblyLoader.Initialize();   // register the kernel assembly resolution callback
-    BootMods(args);                        // run the mod bootstrap
-    return Launch(args);                   // only now enter the business implementation
+    EmbeddedAssemblyLoader.Initialize();   // enregistrer le callback de résolution des assemblies du noyau
+    BootMods(args);                        // exécuter le bootstrap des mods
+    return Launch(args);                   // c'est seulement maintenant qu'on entre dans l'implémentation métier
 }
 ```
 
-This separation is not a matter of style. When the JIT compiles a method it resolves **all types** appearing in that method body, and this happens before the method executes. If `Main` called `ServerMain.Run(args)` directly, `NetCraft.Server.dll` would be pulled up the instant `Main` is JIT-compiled, before the mod bootstrap has run, and the rewrite window would be gone. So both `BootMods` and `Launch` must be marked `MethodImplOptions.NoInlining` — without the marker the JIT inlines them back into `Main`, defeating the split.
+Cette séparation n'est pas une question de style. Quand le JIT compile une méthode, il résout **tous les types** apparaissant dans ce corps de méthode, et cela se produit avant l'exécution de la méthode. Si `Main` appelait directement `ServerMain.Run(args)`, `NetCraft.Server.dll` serait remontée à l'instant où `Main` est compilée par le JIT, avant que le bootstrap des mods ne s'exécute, et la fenêtre de réécriture serait perdue. Donc `BootMods` et `Launch` doivent tous deux être marqués `MethodImplOptions.NoInlining` — sans ce marqueur, le JIT les inline à nouveau dans `Main`, ce qui réduit à néant la séparation.
 
-`NetCraft.Loader` has the same structure, except its mode detection and mod bootstrap are both in `Launch`, and `Main` keeps only the two steps `Initialize` and `Launch`.
+`NetCraft.Loader` a la même structure, sauf que sa détection de mode et son bootstrap des mods sont tous deux dans `Launch`, et `Main` ne garde que les deux étapes `Initialize` et `Launch`.
 
-### 1.2 Kernel assemblies in the kernel/ subdirectory
+### 1.2 Les assemblies du noyau dans le sous-répertoire kernel/
 
-The output directory after a build looks like this:
+Le répertoire de sortie après une compilation ressemble à ceci :
 
 ```
 NetCraft.Server.Exe.exe
-NetCraft.dll              <- main library, embeds all lower-level sub-libraries
-NetCraft.ModLoader.dll    <- the loader itself
-NetCraft.Server.Exe.dll   <- entry assembly
+NetCraft.dll              <- bibliothèque principale, intègre toutes les sous-bibliothèques de niveau inférieur
+NetCraft.ModLoader.dll    <- le loader lui-même
+NetCraft.Server.Exe.dll   <- assembly d'entrée
 kernel/
   NetCraft.Game.dll
   NetCraft.Server.dll
-  ... remaining kernel assemblies
+  ... assemblies du noyau restantes
 mods/
   your-mod.dll
 ```
 
-Why move them into `kernel/` instead of leaving them in the root?
+Pourquoi les déplacer dans `kernel/` au lieu de les laisser à la racine ?
 
-The .NET host treats assemblies registered in `deps.json` as TPA (Trusted Platform Assemblies). For assemblies in the TPA, the runtime resolves **by path** — bytes passed to `AssemblyLoadContext.LoadFromStream` are simply ignored. That is, even if we feed in rewritten bytes ahead of time, the runtime still reads the unrewritten copy from disk. Only by removing the kernel assemblies from `deps.json` and moving the files away does the runtime call back into `AssemblyLoadContext.Resolving` on resolution failure, giving us the chance to hand over the rewritten bytes.
+L'hôte .NET traite les assemblies enregistrées dans `deps.json` comme des TPA (Trusted Platform Assemblies). Pour les assemblies du TPA, le runtime résout **par chemin** — les octets passés à `AssemblyLoadContext.LoadFromStream` sont simplement ignorés. Autrement dit, même si nous fournissons à l'avance des octets réécrits, le runtime lit quand même la copie non réécrite depuis le disque. Ce n'est qu'en retirant les assemblies du noyau de `deps.json` et en déplaçant les fichiers que le runtime rappelle `AssemblyLoadContext.Resolving` en cas d'échec de résolution, nous donnant la possibilité de fournir les octets réécrits.
 
-The three kinds left in the root cannot be moved: the main library (it is the embedding host and must start first), the loader itself (the bootstrap code lives in it), and the entry assembly (the apphost starts from it).
+Les trois sortes laissées à la racine ne peuvent pas être déplacées : la bibliothèque principale (c'est l'hôte d'embarquement et elle doit démarrer en premier), le loader lui-même (le code de bootstrap y réside) et l'assembly d'entrée (l'apphost démarre à partir d'elle).
 
-**Cost**: the entry assembly itself cannot be injected into. If your hook target happens to live in the `NetCraft.Server.Exe.dll` assembly, it is ineffective. Kernel business code is all under `kernel/`, so normally this is not a problem.
+**Coût** : l'assembly d'entrée elle-même ne peut pas être injectée. Si votre cible de hook se trouve dans l'assembly `NetCraft.Server.Exe.dll`, c'est sans effet. Le code métier du noyau est entièrement sous `kernel/`, donc normalement ce n'est pas un problème.
 
-### 1.3 Mod loading sequence
+### 1.3 Séquence de chargement des mods
 
 ```
 EmbeddedAssemblyLoader.Initialize()
-  └─ install the Resolving callback
-BootMods → ModBootstrap.Run(current side)
-  ├─ statically scan mods/*.dll (MetadataReader reads embedded ncmod.json, no assembly is loaded)
-  ├─ filter out mods whose environment does not match the current side
-  ├─ assemble injection rules and hand the rewriter to the main library
-  ├─ preload target assemblies: read bytes → run through rewriter → LoadFromStream
-  └─ call each mod entry's Init()
+  └─ installer le callback Resolving
+BootMods → ModBootstrap.Run(côté courant)
+  ├─ scanner statiquement mods/*.dll (MetadataReader lit le ncmod.json embarqué, aucune assembly n'est chargée)
+  ├─ filtrer les mods dont l'environnement ne correspond pas au côté courant
+  ├─ assembler les règles d'injection et confier le rewriter à la bibliothèque principale
+  ├─ précharger les assemblies cibles : lire les octets → passer par le rewriter → LoadFromStream
+  └─ appeler Init() de chaque entrée de mod
 Launch → ServerMain/ClientMain.Run(args)
-  └─ kernel business starts running; the probes are already inside
+  └─ le métier du noyau commence à tourner ; les sondes sont déjà à l'intérieur
 ```
 
-Note the order: **declarations are scanned, rewritten bytes are loaded, and entry code runs last**. By the time a mod's `Init()` executes, the kernel assemblies have already been replaced.
+Notez l'ordre : **les déclarations sont scannées, les octets réécrits sont chargés, et le code d'entrée s'exécute en dernier**. Au moment où le `Init()` d'un mod s'exécute, les assemblies du noyau ont déjà été remplacées.
 
 ---
 
-## 2. Key differences from Fabric
+## 2. Différences clés avec Fabric
 
 | Dimension | Fabric | NetCraft |
 | --- | --- | --- |
-| Language / runtime | Java / JVM | C# / .NET 10 (CoreCLR) |
-| Mod carrier | jar containing `fabric.mod.json` | dll embedding `ncmod.json` |
-| Declaration reading | read a file inside the jar | `MetadataReader` statically reads embedded resources without loading assemblies |
-| Code injection | Mixin (annotations in source; members are mixed into the target class at class load) | `Lead.Hook` (rules declared in a manifest or annotations; bytes are rewritten in place during assembly resolution) |
-| Injection granularity | any line in a method body, including locals and intermediate expression values | thirteen forms (call site, field read/write, constructor, type check, boxing, local variable, constant, whole-method-body replacement, probes, etc.), with insert-before or insert-after |
-| Loading model | Fabric Loader + Knot class loader | single default ALC + `AssemblyLoadContext.Resolving` |
-| Official API scope | Fabric API has a great many modules | NetCraft-ModApi currently has only event and command extension points |
+| Langage / runtime | Java / JVM | C# / .NET 10 (CoreCLR) |
+| Support du mod | jar contenant `fabric.mod.json` | dll embarquant `ncmod.json` |
+| Lecture des déclarations | lire un fichier à l'intérieur du jar | `MetadataReader` lit statiquement les ressources embarquées sans charger d'assemblies |
+| Injection de code | Mixin (annotations dans le source ; les membres sont mixés dans la classe cible au chargement de la classe) | `Lead.Hook` (règles déclarées dans un manifeste ou des annotations ; les octets sont réécrits sur place lors de la résolution des assemblies) |
+| Granularité d'injection | n'importe quelle ligne d'un corps de méthode, y compris les locales et les valeurs intermédiaires d'expressions | treize formes (site d'appel, lecture/écriture de champ, constructeur, vérification de type, boxing, variable locale, constante, remplacement de tout le corps de méthode, sondes, etc.), avec insertion avant ou après |
+| Modèle de chargement | Fabric Loader + class loader Knot | ALC par défaut unique + `AssemblyLoadContext.Resolving` |
+| Périmètre de l'API officielle | l'API Fabric a un très grand nombre de modules | NetCraft-ModApi ne possède actuellement que des points d'extension pour les événements et les commandes |
 
-### 2.1 Injection styles: annotations or manifest, pick one
+### 2.1 Styles d'injection : annotations ou manifeste, choisissez-en un
 
-Fabric's Mixin is annotated **in source**:
+Le Mixin de Fabric s'annote **dans le source** :
 
 ```java
 @Inject(method = "tick", at = @At("HEAD"))
 private void onTick(CallbackInfo ci) { ... }
 ```
 
-NC supports both styles, but their prerequisites differ: the annotation form relies on `InjectAttribute` in `NetCraft.ModApi.Extension`, so a mod that does not reference it cannot use annotations; the manifest form is pure data written in `ncmod.json` and requires no reference for injection rules.
+NC prend en charge les deux styles, mais leurs prérequis diffèrent : la forme par annotation s'appuie sur `InjectAttribute` dans `NetCraft.ModApi.Extension`, donc un mod qui ne le référence pas ne peut pas utiliser les annotations ; la forme par manifeste est de la pure donnée écrite dans `ncmod.json` et n'exige aucune référence pour les règles d'injection.
 
-**Annotation**, placed on your own replacement method:
+**Annotation**, placée sur votre propre méthode de remplacement :
 
 ```csharp
 [Inject(typeof(DedicatedServer), nameof(DedicatedServer.Tick),
@@ -107,7 +107,7 @@ NC supports both styles, but their prerequisites differ: the annotation form rel
 public static void OnTick(object self) { ... }
 ```
 
-**Manifest**, written in `hooks` in `ncmod.json`:
+**Manifeste**, écrit dans `hooks` de `ncmod.json` :
 
 ```json
 {
@@ -121,41 +121,41 @@ public static void OnTick(object self) { ... }
 }
 ```
 
-During assembly the two routes merge into one rule table, and **if the same injection point is written in both, the annotation wins**. After merging they are indistinguishable; the difference is in prerequisites and ergonomics:
+Pendant l'assemblage, les deux voies fusionnent en une seule table de règles, et **si le même point d'injection est écrit dans les deux, l'annotation gagne**. Après fusion, elles sont indiscernables ; la différence tient aux prérequis et à l'ergonomie :
 
-| | Annotation | Manifest |
+| | Annotation | Manifeste |
 | --- | --- | --- |
-| Where it is written | on the replacement method | in `hooks` in `ncmod.json` |
-| Prerequisite | must reference `NetCraft.ModApi` | none, pure data |
-| Type names | `typeof` / `nameof`, checked by the compiler | hand-written strings; typos are only found during assembly |
-| What it can carry | injection rules only | mod identity (id, entry, environment, display info) and injection rules |
+| Où elle est écrite | sur la méthode de remplacement | dans `hooks` de `ncmod.json` |
+| Prérequis | doit référencer `NetCraft.ModApi` | aucun, pure donnée |
+| Noms de types | `typeof` / `nameof`, vérifiés par le compilateur | chaînes écrites à la main ; les fautes ne sont trouvées que pendant l'assemblage |
+| Ce qu'elle peut porter | les règles d'injection uniquement | l'identité du mod (id, entry, environment, informations d'affichage) et les règles d'injection |
 
-So `ncmod.json` must be written whether or not you use annotations; it is the sole source of mod identity. Annotations only make rules less error-prone to write. The manifest has no dependency field; dependency relationships are inferred from assembly references (see 6.1) and need no declaration.
+Donc `ncmod.json` doit être écrit que vous utilisiez ou non les annotations ; c'est la seule source de l'identité du mod. Les annotations ne font que rendre les règles moins sujettes aux erreurs d'écriture. Le manifeste n'a pas de champ de dépendance ; les relations de dépendance sont déduites des références d'assemblies (voir 6.1) et n'ont pas besoin d'être déclarées.
 
-Conversely, **a mod that does not reference `NetCraft.ModApi` can only use the manifest** — this affects more than injection rules: events like `ServerEvents` and the `Nc*` facades are also in ModApi (under `NetCraft.ModApi.Wrapper`, see [3.3](#33-a-side-by-side-example)), so a mod that cannot use annotations also cannot use them.
+Inversement, **un mod qui ne référence pas `NetCraft.ModApi` ne peut utiliser que le manifeste** — cela affecte plus que les règles d'injection : des événements comme `ServerEvents` et les façades `Nc*` sont aussi dans ModApi (sous `NetCraft.ModApi.Wrapper`, voir [3.3](#33-un-exemple-côte-à-côte)), donc un mod qui ne peut pas utiliser les annotations ne peut pas non plus les utiliser.
 
-The differences from Fabric remain:
+Les différences avec Fabric subsistent :
 
-- **How and when changes happen**: Mixin has a transformer **mix members of the mixin class into** the target class at **class load**, so what gets loaded is a synthesized new class and the original no longer exists; NC rewrites the target method's instructions in place **before the assembly enters memory**, so the class is still the same class, only its method body changes. Both rewrite at load time, neither modifies bytecode at compile time — Mixin's annotation processor only generates a refmap (obfuscation mapping) and performs validation at build time, while NC is not obfuscated and has no such layer at all.
-- Mixin can inject at **any position in the middle of a method body**; NC can target a specific call site, field access, construction, local variable read/write, or constant within a specified host method, and can insert before or after it (`InType`/`InMethod` narrow the scope, `Placement` decides insert or replace), but it **cannot reach an arbitrary line number** and cannot change a jump target or an intermediate expression value on the stack.
-- Mixin targets use a string method name plus descriptor; NC uses "full type name + method name", so same-name overloads all match, and precision to a single one requires `InType`/`InMethod`.
+- **Comment et quand les changements ont lieu** : Mixin dispose d'un transformer qui **mixe les membres de la classe mixin dans** la classe cible au **chargement de la classe**, donc ce qui est chargé est une nouvelle classe synthétisée et l'originale n'existe plus ; NC réécrit sur place les instructions de la méthode cible **avant que l'assembly n'entre en mémoire**, donc la classe reste la même classe, seul son corps de méthode change. Les deux réécrivent au chargement, aucun ne modifie le bytecode à la compilation — le processeur d'annotations de Mixin ne génère qu'un refmap (mapping d'obfuscation) et effectue la validation à la compilation, tandis que NC n'est pas obfusqué et n'a pas du tout une telle couche.
+- Mixin peut injecter à **n'importe quelle position au milieu d'un corps de méthode** ; NC peut cibler un site d'appel, un accès à un champ, une construction, une lecture/écriture de variable locale ou une constante précis dans une méthode hôte spécifiée, et peut insérer avant ou après (`InType`/`InMethod` restreignent la portée, `Placement` décide insertion ou remplacement), mais il **ne peut pas atteindre un numéro de ligne arbitraire** et ne peut pas changer une cible de saut ni une valeur intermédiaire d'expression sur la pile.
+- Les cibles de Mixin utilisent un nom de méthode sous forme de chaîne plus un descripteur ; NC utilise « nom de type complet + nom de méthode », donc les surcharges de même nom correspondent toutes, et la précision sur une seule exige `InType`/`InMethod`.
 
-**Which layer handles annotations**: the annotation type (`InjectAttribute`) is provided by `NetCraft.ModApi.Extension`, and it is resolved by `NetCraft.ModLoader` — when scanning mods it statically reads the `CustomAttribute` table with `MetadataReader`, without loading assemblies. **`Lead.Hook` does not recognize annotations**; it only sees the merged rule table, and the native injection layer recognizes only the description bytes compiled on the managed side, not even reading `ncmod.json`.
+**Quelle couche traite les annotations** : le type d'annotation (`InjectAttribute`) est fourni par `NetCraft.ModApi.Extension`, et il est résolu par `NetCraft.ModLoader` — lors du scan des mods, il lit statiquement la table `CustomAttribute` avec `MetadataReader`, sans charger d'assemblies. **`Lead.Hook` ne reconnaît pas les annotations** ; il ne voit que la table de règles fusionnée, et la couche d'injection native ne reconnaît que les octets de description compilés côté managé, sans même lire `ncmod.json`.
 
-This determines what annotations can express: what you can write depends entirely on which fields `InjectAttribute` has. Currently there are seven — target type, method name, `HookType`, `Label`, `Environment`, `PatchMode`, `Ordinal` — and `InType`/`InMethod`/`Placement` from [2.4](#24-narrowing-to-one-site-host-scoping-and-placement) and `LocalIndex`/`ConstantValue` from [2.5](#25-in-method-body-anchors-local-variables-and-constants) **cannot be written in annotations**; use the C# API or wait for the manifest to catch up. The manifest side is missing these too — the only thing it accepts beyond annotations is `ordinal`.
+Cela détermine ce que les annotations peuvent exprimer : ce que vous pouvez écrire dépend entièrement des champs que possède `InjectAttribute`. Actuellement il y en a sept — type cible, nom de méthode, `HookType`, `Label`, `Environment`, `PatchMode`, `Ordinal` — et `InType`/`InMethod`/`Placement` de la section [2.4](#24-se-restreindre-à-un-seul-site--portée-de-lhôte-et-placement) et `LocalIndex`/`ConstantValue` de la section [2.5](#25-ancres-dans-le-corps-de-méthode--variables-locales-et-constantes) **ne peuvent pas être écrits dans les annotations** ; utilisez l'API C# ou attendez que le manifeste rattrape son retard. Le côté manifeste les omet aussi — la seule chose qu'il accepte au-delà des annotations est `ordinal`.
 
-For the thirteen injection forms see the [modding-guide appendix](#appendix-hooktype-overview) and [mod-api.md](mod-api.md).
+Pour les treize formes d'injection, voir l'[annexe du guide de modding](#annexe--aperçu-des-hooktype) et [modapi-fr.md](modapi-fr.md).
 
-### 2.2 An important constraint: probe classes must not carry kernel types in signatures
+### 2.2 Une contrainte importante : les classes de sonde ne doivent pas porter de types du noyau dans leurs signatures
 
-NC rewriting happens **before** the kernel assemblies are loaded. When assembling rules, `Lead.Hook` uses reflection to find your replacement method and build a method reference, and this process resolves every parameter type and return type in the signature.
+La réécriture NC a lieu **avant** que les assemblies du noyau soient chargées. Lors de l'assemblage des règles, `Lead.Hook` utilise la réflexion pour trouver votre méthode de remplacement et construire une référence de méthode, et ce processus résout chaque type de paramètre et type de retour de la signature.
 
-Therefore: **a replacement method's signature may only use BCL types and `object`**. Once a `NetCraft.*` type appears in the signature, resolving it pulls up the kernel assemblies early and injection fails outright.
+Par conséquent : **la signature d'une méthode de remplacement ne peut utiliser que des types BCL et `object`**. Dès qu'un type `NetCraft.*` apparaît dans la signature, sa résolution remonte prématurément les assemblies du noyau et l'injection échoue complètement.
 
-When you need a kernel object, declare the parameter as `object` and cast inside the method body:
+Quand vous avez besoin d'un objet du noyau, déclarez le paramètre en `object` et effectuez un cast à l'intérieur du corps de méthode :
 
 ```csharp
-//assembly only sees object; the method body is JIT-compiled after the kernel starts
+//l'assemblage ne voit que object ; le corps de méthode est compilé par le JIT après le démarrage du noyau
 public static void OnCommandsReady(object dispatcher)
 {
     var typed = (CommandDispatcher<CommandSourceStack>)dispatcher;
@@ -163,119 +163,119 @@ public static void OnCommandsReady(object dispatcher)
 }
 ```
 
-### 2.3 CallSite is replacement, not insertion
+### 2.3 CallSite est un remplacement, pas une insertion
 
-A `CallSite` rule's replacement method **replaces** the original call, so the original method is not executed. To preserve the original behavior you must restore it yourself in the replacement method:
+La méthode de remplacement d'une règle `CallSite` **remplace** l'appel d'origine, donc la méthode d'origine n'est pas exécutée. Pour préserver le comportement d'origine, vous devez le restaurer vous-même dans la méthode de remplacement :
 
 ```csharp
 public static void OnCommandsReady(object dispatcher)
 {
     var typed = (CommandDispatcher<CommandSourceStack>)dispatcher;
-    EffectCommand.Register(typed);              // restore the replaced call
-    ServerEvents.CommandRegister.Publish(...);  // then add the mod's own logic
+    EffectCommand.Register(typed);              // restaurer l'appel remplacé
+    ServerEvents.CommandRegister.Publish(...);  // puis ajouter la logique propre au mod
 }
 ```
 
-Miss this step and the original functionality disappears entirely.
+Manquez cette étape et la fonctionnalité d'origine disparaît entièrement.
 
-A few details about carrying this out:
+Quelques détails sur la mise en œuvre :
 
-- **`this` on an instance method counts as a parameter too**. Whether the target method is an instance method determines whether the replacement method needs an extra leading parameter. In IL both `call` and `callvirt` count as instance calls — for a non-virtual method on a `sealed` type the compiler emits `call`.
-- **One rule key covers all overloads under that class name**; overloads with the same parameter count share one replacement method. `Disconnect(string)` and `Disconnect(Component)` share this way, and the replacement method dispatches by the real argument type.
-- **A private method cannot be called from outside**, so the replacement method cannot restore the original call. Either give up this hook point or call it once via reflection (acceptable at low frequency).
-- **Value-type parameters and return values cannot be declared as `object`**, `object` is a reference on the stack while `float`/`bool` are values, and a mismatch is invalid IL. Keep these two positions as their real types.
-- **Unicast callbacks cannot be assigned directly**. Some kernel callback properties (e.g., the three chunk callbacks on `ServerChunkCache`) are `Action<T>` rather than `event`, and the kernel already occupies them. A mod assigning directly overrides the kernel's copy with no error at all. The correct approach is to hook the property's setter and, at the moment of assignment, chain your logic and the kernel callback into one wrapper delegate.
+- **`this` sur une méthode d'instance compte aussi comme un paramètre**. Le fait que la méthode cible soit une méthode d'instance détermine si la méthode de remplacement a besoin d'un paramètre supplémentaire en tête. En IL, `call` et `callvirt` comptent tous deux comme des appels d'instance — pour une méthode non virtuelle sur un type `sealed`, le compilateur émet `call`.
+- **Une clé de règle couvre toutes les surcharges sous ce nom de classe** ; les surcharges de même nombre de paramètres partagent une même méthode de remplacement. `Disconnect(string)` et `Disconnect(Component)` partagent ainsi, et la méthode de remplacement distribue selon le type réel de l'argument.
+- **Une méthode privée ne peut pas être appelée depuis l'extérieur**, donc la méthode de remplacement ne peut pas restaurer l'appel d'origine. Soit abandonner ce point de hook, soit l'appeler une fois par réflexion (acceptable à basse fréquence).
+- **Les paramètres et valeurs de retour de types valeur ne peuvent pas être déclarés en `object`**, `object` est une référence sur la pile tandis que `float`/`bool` sont des valeurs, et une incohérence donne un IL invalide. Conservez ces deux positions avec leurs types réels.
+- **Les callbacks unicast ne peuvent pas être assignés directement**. Certaines propriétés de callback du noyau (p. ex. les trois callbacks de chunk sur `ServerChunkCache`) sont des `Action<T>` plutôt que des `event`, et le noyau les occupe déjà. Un mod qui assigne directement écrase la copie du noyau sans aucune erreur. L'approche correcte est de hooker le setter de la propriété et, au moment de l'assignation, d'enchaîner votre logique et le callback du noyau dans un seul délégué wrapper.
 
-### 2.4 Narrowing to one site: host scoping and placement
+### 2.4 Se restreindre à un seul site : portée de l'hôte et placement
 
-An instruction-level rule's default scope is **the entire assembly** — every place that calls the target method or reads/writes the target field matches. To narrow to one site, use two optional parameters:
+La portée par défaut d'une règle au niveau instruction est **l'assembly entière** — chaque endroit qui appelle la méthode cible ou lit/écrit le champ cible correspond. Pour se restreindre à un seul site, utilisez deux paramètres optionnels :
 
-| Parameter | Effect |
+| Paramètre | Effet |
 | --- | --- |
-| `InType` / `InMethod` | match anchors only inside the specified host method body; both empty means unrestricted |
-| `Placement` | `Replace` replaces the anchor (default); `Before` / `After` keep the anchor and insert one call before or after it |
-| `Ordinal` | when the same anchor matches multiple places in the host method, pick which one, 0-based. Omitted means every place is modified |
+| `InType` / `InMethod` | ne faire correspondre les ancres qu'à l'intérieur du corps de la méthode hôte spécifiée ; les deux vides signifie sans restriction |
+| `Placement` | `Replace` remplace l'ancre (par défaut) ; `Before` / `After` gardent l'ancre et insèrent un appel avant ou après |
+| `Ordinal` | quand la même ancre correspond à plusieurs endroits dans la méthode hôte, choisir lequel, base 0. Omis signifie que tous les endroits sont modifiés |
 
 ```csharp
-//example: instrument only when LevelChunk reads block state; PalettedContainer::Get elsewhere is untouched
+//exemple : n'instrumenter que lorsque LevelChunk lit l'état d'un bloc ; PalettedContainer::Get ailleurs n'est pas touché
 new HookRule("NetCraft.Storage.PalettedContainer", "Get", typeof(MyProbe), nameof(MyProbe.OnGet),
     HookType.CallSite, PatchMode.ILRewrite,
     inType: "NetCraft.Storage.LevelChunk", inMethod: "GetBlockState",
     placement: HookPlacement.Before)
 ```
 
-The two modes impose different requirements on the callback signature:
+Les deux modes imposent des exigences différentes sur la signature du callback :
 
-- **Replace mode** aligns with the arguments of the replaced call (including `this` for instance calls); whether the callback restores the original call is up to you.
-- **Insert mode** passes the **host method's parameters** (including `this`), consistent with the `MethodBody` convention. Insertion does not disturb the stack the anchor has already built up; the original call runs as usual, just with one extra callback before or after it.
+- **Mode remplacement** s'aligne sur les arguments de l'appel remplacé (y compris `this` pour les appels d'instance) ; c'est à vous de décider si le callback restaure l'appel d'origine.
+- **Mode insertion** passe les **paramètres de la méthode hôte** (y compris `this`), conformément à la convention `MethodBody`. L'insertion ne perturbe pas la pile déjà construite par l'ancre ; l'appel d'origine s'exécute comme d'habitude, juste avec un callback supplémentaire avant ou après.
 
-A few boundaries:
+Quelques limites :
 
-- `InType` and `InMethod` are independent; you may specify just one. Both empty is equivalent to no scoping.
-- Multiple rules may hook the same anchor, each scoped to a different host; **the first host match wins**.
-- `Placement` only applies to instruction-level forms (`CallSite`, `NewObj`, field read/write, `TypeCheck`, `Box`, `FunctionPointer`, and the three kinds in [2.5](#25-in-method-body-anchors-local-variables-and-constants)); `MethodBody` always replaces the whole thing.
-- `Ordinal` counts the **order of matches**, regardless of whether that site is ultimately modified; if the rule does not occur enough times in the host method, the rule does not land. Same idea as Mixin's `@At(ordinal)`.
-- `InType` / `InMethod` / `Placement` / `LocalIndex` / `ConstantValue` are currently available only on the C# API; neither `ncmod.json` nor `[Inject]` supports them (the manifest accepts `ordinal`), so manifest-based mods cannot use the first few.
+- `InType` et `InMethod` sont indépendants ; vous pouvez n'en spécifier qu'un. Les deux vides équivaut à aucune portée.
+- Plusieurs règles peuvent hooker la même ancre, chacune limitée à un hôte différent ; **la première correspondance d'hôte l'emporte**.
+- `Placement` ne s'applique qu'aux formes au niveau instruction (`CallSite`, `NewObj`, lecture/écriture de champ, `TypeCheck`, `Box`, `FunctionPointer`, et les trois sortes de la section [2.5](#25-ancres-dans-le-corps-de-méthode--variables-locales-et-constantes)) ; `MethodBody` remplace toujours l'ensemble.
+- `Ordinal` compte l'**ordre des correspondances**, indépendamment du fait que ce site soit finalement modifié ; si la règle n'apparaît pas assez de fois dans la méthode hôte, la règle n'est pas appliquée. Même idée que `@At(ordinal)` de Mixin.
+- `InType` / `InMethod` / `Placement` / `LocalIndex` / `ConstantValue` ne sont actuellement disponibles que sur l'API C# ; ni `ncmod.json` ni `[Inject]` ne les prennent en charge (le manifeste accepte `ordinal`), donc les mods basés sur le manifeste ne peuvent pas utiliser les premiers.
 
-### 2.5 In-method-body anchors: local variables and constants
+### 2.5 Ancres dans le corps de méthode : variables locales et constantes
 
-The previous kinds anchor to a **referenced entity** (a method, field, or constructor), whereas `LocalRead` / `LocalWrite` / `Constant` anchor to **a position inside the host method body**, corresponding to Mixin's `@ModifyVariable` and `@ModifyConstant`. For these three, `OriginalType` / `OriginalMethod` name the **host method**, not a referenced entity.
+Les sortes précédentes s'ancrent à une **entité référencée** (une méthode, un champ ou un constructeur), tandis que `LocalRead` / `LocalWrite` / `Constant` s'ancrent à **une position à l'intérieur du corps de la méthode hôte**, correspondant à `@ModifyVariable` et `@ModifyConstant` de Mixin. Pour ces trois, `OriginalType` / `OriginalMethod` désignent la **méthode hôte**, pas une entité référencée.
 
-| Form | Extra parameter | Selected positions |
+| Forme | Paramètre supplémentaire | Positions sélectionnées |
 | --- | --- | --- |
-| `LocalRead` | `LocalIndex` | every read of that slot (0-based) |
-| `LocalWrite` | `LocalIndex` | every write to that slot |
-| `Constant` | `ConstantValue` | every load of that constant, compared by boxed type |
+| `LocalRead` | `LocalIndex` | chaque lecture de cet emplacement (base 0) |
+| `LocalWrite` | `LocalIndex` | chaque écriture dans cet emplacement |
+| `Constant` | `ConstantValue` | chaque chargement de cette constante, comparé par type boxé |
 
 ```csharp
-//example: insert one callback before the write to slot 0 in G
+//exemple : insérer un callback avant l'écriture dans l'emplacement 0 de G
 new HookRule("TargetLib.Host", "G", typeof(MyProbe), nameof(MyProbe.OnWrite),
     HookType.LocalWrite, PatchMode.ILRewrite,
     localIndex: 0, placement: HookPlacement.Before)
 
-//example: replace the constant 5 in G with the return value of OnConst()
+//exemple : remplacer la constante 5 de G par la valeur de retour de OnConst()
 new HookRule("TargetLib.Host", "G", typeof(MyProbe), nameof(MyProbe.OnConst),
     HookType.Constant, PatchMode.ILRewrite, constantValue: 5)
 ```
 
-In replace mode the callback signature aligns with the **instruction's stack effect**, not the host parameters:
+En mode remplacement, la signature du callback s'aligne sur l'**effet sur la pile de l'instruction**, pas sur les paramètres de l'hôte :
 
-| Anchor | Stack effect | Replacement method signature |
+| Ancre | Effet sur la pile | Signature de la méthode de remplacement |
 | --- | --- | --- |
-| `LocalRead` | pushes one value | zero parameters, returns that value |
-| `LocalWrite` | pops one value | one parameter |
-| `Constant` | pushes one value | zero parameters, returns that value |
+| `LocalRead` | pousse une valeur | zéro paramètre, renvoie cette valeur |
+| `LocalWrite` | dépile une valeur | un paramètre |
+| `Constant` | pousse une valeur | zéro paramètre, renvoie cette valeur |
 
-`ConstantValue` is compared by boxed type, so `5` (int) and `5L` (long) are two different anchors; to match `ldc.i8` you must pass `long`.
+`ConstantValue` est comparé par type boxé, donc `5` (int) et `5L` (long) sont deux ancres différentes ; pour correspondre à `ldc.i8`, vous devez passer un `long`.
 
-A slot is the compiled local variable index; the same source may change it under a different compiler version, so do not treat it as a stable identifier when porting across versions.
+Un emplacement est l'index compilé de la variable locale ; le même source peut le changer sous une version différente du compilateur, donc ne le traitez pas comme un identifiant stable lors d'un portage entre versions.
 
-### 2.6 Runtime injection: modifying already-running code
+### 2.6 Injection à l'exécution : modifier du code déjà en cours d'exécution
 
-The injection discussed so far all happens **before assembly load** — bytes are rewritten first, then handed to the runtime. The premise is that the target assembly has not been loaded yet.
+L'injection dont on a parlé jusqu'ici a toujours lieu **avant le chargement de l'assembly** — les octets sont d'abord réécrits, puis remis au runtime. Le postulat est que l'assembly cible n'est pas encore chargée.
 
-`Lead.Hook` has another route: using the CLR's Profiler interface (ReJIT) to modify code that is **already loaded, or whose methods have already run**. Both share the same `HookRule`, and the parameters from [2.4](#24-narrowing-to-one-site-host-scoping-and-placement) and [2.5](#25-in-method-body-anchors-local-variables-and-constants) remain available:
+`Lead.Hook` a une autre voie : utiliser l'interface Profiler du CLR (ReJIT) pour modifier du code **déjà chargé, ou dont les méthodes ont déjà tourné**. Les deux partagent le même `HookRule`, et les paramètres de la section [2.4](#24-se-restreindre-à-un-seul-site--portée-de-lhôte-et-placement) et de la section [2.5](#25-ancres-dans-le-corps-de-méthode--variables-locales-et-constantes) restent disponibles :
 
 ```csharp
 var engine = new HookEngine();
 engine.AddRule(new HookRule("TargetLib.Host", "Callee", typeof(Hooks), nameof(Hooks.Double),
     hookType: HookType.CallSite, patchMode: PatchMode.RuntimeInject, inMethod: "A"));
 
-//one call and injection is done; no restart and no file changes
+//un seul appel et l'injection est faite ; pas de redémarrage et pas de modification de fichier
 RuntimeInjector.Inject(typeof(Host).Assembly, engine);
 ```
 
-| | Load-time rewriting | Runtime injection |
+| | Réécriture au chargement | Injection à l'exécution |
 | --- | --- | --- |
-| Manifest `patchMode` | `ILRewrite` (default) | `RuntimeInject` |
-| Timing | before the assembly enters memory | any time after the process has started |
-| Foundation | Mono.Cecil byte rewriting | CLR Profiler ReJIT |
-| Prerequisite | the target has not been loaded | the target is already in the process |
-| Modify already-JIT-compiled code | not possible | possible |
+| `patchMode` du manifeste | `ILRewrite` (par défaut) | `RuntimeInject` |
+| Moment | avant que l'assembly n'entre en mémoire | à tout moment après le démarrage du processus |
+| Fondement | réécriture d'octets Mono.Cecil | CLR Profiler ReJIT |
+| Prérequis | la cible n'a pas été chargée | la cible est déjà dans le processus |
+| Modifier du code déjà compilé par le JIT | impossible | possible |
 
-**Why rules are shared**: Cecil still does the rewriting here, but the result is not written to disk; instead it is compiled into a description handed to the native layer, which submits the new method body to the CLR at runtime, with the remaining version management left to the CLR.
+**Pourquoi les règles sont partagées** : Cecil fait toujours la réécriture ici, mais le résultat n'est pas écrit sur disque ; il est plutôt compilé en une description remise à la couche native, qui soumet le nouveau corps de méthode au CLR à l'exécution, la gestion des versions restante étant laissée au CLR.
 
-**How a mod does it**: add a `patchMode` entry to the rule item in `ncmod.json`; the `[Inject]` annotation has a parameter of the same name.
+**Comment un mod procède** : ajoutez une entrée `patchMode` à l'élément de règle dans `ncmod.json` ; l'annotation `[Inject]` a un paramètre du même nom.
 
 ```json
 { "target": "NetCraft.Game.Server.DedicatedServer", "method": "Tick",
@@ -288,65 +288,65 @@ RuntimeInjector.Inject(typeof(Host).Assembly, engine);
 public static void OnTick(object self) { }
 ```
 
-**What assembly does**: these rules do not go through the load-time rewriting path (`ModHooks.Rewrite` applies only `ILRewrite`); at assembly time a separate runtime target table is recorded. After the kernel assemblies are preloaded and before mods' `Init()`, the loader takes each of their **already loaded** instances and submits the rewritten method bodies to the CLR. If a target is not loaded at that moment it is skipped with a warning, and it will not be loaded early on its behalf — the constraint from [2.2](#22-an-important-constraint-probe-classes-must-not-carry-kernel-types-in-signatures) that "pulling up the kernel early misses the window" is reversed in direction here, with the same conclusion: if it is not present, it cannot be done.
+**Ce que fait l'assemblage** : ces règles ne passent pas par le chemin de réécriture au chargement (`ModHooks.Rewrite` n'applique que `ILRewrite`) ; au moment de l'assemblage, une table de cibles d'exécution distincte est enregistrée. Après le préchargement des assemblies du noyau et avant le `Init()` des mods, le loader prend chacune de leurs instances **déjà chargées** et soumet les corps de méthode réécrits au CLR. Si une cible n'est pas chargée à ce moment, elle est ignorée avec un avertissement, et elle ne sera pas chargée à l'avance pour elle — la contrainte de la section [2.2](#22-une-contrainte-importante--les-classes-de-sonde-ne-doivent-pas-porter-de-types-du-noyau-dans-leurs-signatures) selon laquelle « remonter le noyau prématurément fait manquer la fenêtre » est ici inversée en direction, avec la même conclusion : si elle n'est pas présente, on ne peut pas le faire.
 
-**To hook the native injection layer**: the ReJIT switch can only be set via environment variables at process start (`CORECLR_ENABLE_PROFILING` / `CORECLR_PROFILER` / `CORECLR_PROFILER_PATH`); setting them after startup has no effect. When the loader detects `RuntimeInject` rules early during startup and the process is not yet hooked, it **restarts the process with the same command line** carrying these three variables (`NC_PROFILER_ATTACHED=1` guards against repeated restarts when "hooked but not effective"). The native library `lead_hook_native` must be placed in the program root, or pointed elsewhere via `NC_PROFILER_PATH`; if neither is present, the whole batch of rules is downgraded to a single warning and startup is not blocked.
+**Pour hooker la couche d'injection native** : l'interrupteur ReJIT ne peut être activé que via des variables d'environnement au démarrage du processus (`CORECLR_ENABLE_PROFILING` / `CORECLR_PROFILER` / `CORECLR_PROFILER_PATH`) ; les définir après le démarrage n'a aucun effet. Quand le loader détecte tôt, au démarrage, des règles `RuntimeInject` et que le processus n'est pas encore hooké, il **redémarre le processus avec la même ligne de commande** en portant ces trois variables (`NC_PROFILER_ATTACHED=1` protège contre les redémarrages répétés quand « hooké mais sans effet »). La bibliothèque native `lead_hook_native` doit être placée à la racine du programme, ou pointée ailleurs via `NC_PROFILER_PATH` ; si ni l'une ni l'autre n'est présente, tout le lot de règles est dégradé en un simple avertissement et le démarrage n'est pas bloqué.
 
-**Do not mix it with load-time rewriting on the same target**: a method body submitted by runtime injection is derived from **original bytes** and does not include changes load-time rewriting made to the same method — if the same method is hit by both rule types, the load-time version is overwritten entirely. Assembly cannot tell whether two rules hit the same method, so it can only make a coarse judgment by target assembly and record a warning.
+**Ne le mélangez pas avec la réécriture au chargement sur la même cible** : un corps de méthode soumis par injection à l'exécution est dérivé des **octets d'origine** et n'inclut pas les changements apportés par la réécriture au chargement à la même méthode — si la même méthode est touchée par les deux types de règles, la version issue de la réécriture au chargement est entièrement écrasée. L'assemblage ne peut pas dire si deux règles touchent la même méthode, donc il ne peut qu'en juger grossièrement par assembly cible et enregistrer un avertissement.
 
-**Annotations do not take part in this path directly**: the native injection layer does not recognize `InjectAttribute` or read `ncmod.json` — it recognizes only description bytes. Annotations and the manifest are both **assembly-time** things (see [2.1](#21-injection-styles-annotations-or-manifest-pick-one)), parsed by `NetCraft.ModLoader` into `HookRule` and then handed to `RuntimeInjector`; the mod side does not need to handle them differently.
+**Les annotations ne participent pas directement à ce chemin** : la couche d'injection native ne reconnaît ni `InjectAttribute` ni `ncmod.json` — elle ne reconnaît que les octets de description. Les annotations et le manifeste sont tous deux des choses **propres au moment de l'assemblage** (voir [2.1](#21-styles-dinjection--annotations-ou-manifeste-choisissez-en-un)), analysés par `NetCraft.ModLoader` en `HookRule` puis remis à `RuntimeInjector` ; le côté mod n'a pas besoin de les traiter différemment.
 
-**Limitations** (narrower than load-time rewriting): methods with exception handling tables are not supported, the local variable table cannot be changed, generic types and methods are not supported, and operands recognize only method references (field references, string constants, and type tokens throw `NotSupportedException`).
+**Limitations** (plus étroites que la réécriture au chargement) : les méthodes avec des tables de gestion d'exceptions ne sont pas prises en charge, la table des variables locales ne peut pas être modifiée, les types et méthodes génériques ne sont pas pris en charge, et les opérandes ne reconnaissent que les références de méthode (les références de champ, les constantes de chaîne et les tokens de type lèvent `NotSupportedException`).
 
-**Performance**: injection happens only at registration; afterward the method is ordinary JIT code with the same call overhead as without injection. Attaching the profiler has a one-time cost — enabling ReJIT requires disabling ReadyToRun images at the same time, and measured process startup is about 80–110 ms slower; steady-state computation shows no difference. For a server like NC whose startup is already measured in seconds, this is negligible.
+**Performance** : l'injection n'a lieu qu'à l'enregistrement ; ensuite la méthode est du code JIT ordinaire avec le même surcoût d'appel qu'avec l'injection. L'attachement du profiler a un coût ponctuel — activer ReJIT exige de désactiver en même temps les images ReadyToRun, et le démarrage du processus mesuré est environ 80–110 ms plus lent ; le calcul en régime stable ne montre aucune différence. Pour un serveur comme NC dont le démarrage se mesure déjà en secondes, c'est négligeable.
 
-### 2.7 Do two mods modifying the same class conflict like Mixin?
+### 2.7 Deux mods qui modifient la même classe entrent-ils en conflit comme avec Mixin ?
 
-First, why things conflict on the Mixin side. Mixin **mixes members into the target class** and applies them at class load: when multiple mixins mix into the same class, cases like injecting at the same place repeatedly or adding same-named members to the same class throw `MixinApplyError`, and the default fail-hard **kills the game outright**; moreover this detection happens at the instant of class load, when the game may already be half-running.
+D'abord, pourquoi les choses entrent en conflit du côté Mixin. Mixin **mixe des membres dans la classe cible** et les applique au chargement de la classe : quand plusieurs mixins se mixent dans la même classe, des cas comme injecter plusieurs fois au même endroit ou ajouter des membres de même nom à la même classe lèvent `MixinApplyError`, et le fail-hard par défaut **tue le jeu carrément** ; de plus, cette détection se produit à l'instant du chargement de la classe, quand le jeu peut déjà être à moitié en cours d'exécution.
 
-NC's model is different, and the surface where conflicts can happen is much smaller:
+Le modèle de NC est différent, et la surface où des conflits peuvent se produire est bien plus petite :
 
 | | Mixin | NetCraft |
 | --- | --- | --- |
-| Landing method | mix members into the target class + rewrite bytecode | rewrite IL instructions only; no type synthesis, no members added |
-| Structural conflicts (same-named members, inheritance conflicts) | yes | none |
-| When rules are validated | at class load | at assembly time, statically reading metadata |
-| Two rules hitting the same place | throws | first come, first served; the latter silently fails |
-| One mod fails | may drag down the whole load | affects only itself |
+| Méthode d'application | mixer des membres dans la classe cible + réécrire le bytecode | réécrire uniquement les instructions IL ; aucune synthèse de type, aucun membre ajouté |
+| Conflits structurels (membres de même nom, conflits d'héritage) | oui | aucun |
+| Moment de validation des règles | au chargement de la classe | au moment de l'assemblage, en lisant statiquement les métadonnées |
+| Deux règles touchant le même endroit | lève une exception | premier arrivé, premier servi ; la seconde échoue silencieusement |
+| Un mod échoue | peut entraîner tout le chargement | n'affecte que lui-même |
 
-**Static validation**: rules are not built by loading assemblies and reflecting over types, but by reading PE metadata tables. So problems like "the target type is not in any known assembly" or "the injection form is misspelled" are recorded and skipped **early at startup**, without waiting for a class to load before exploding.
+**Validation statique** : les règles ne sont pas construites en chargeant des assemblies et en réfléchissant sur les types, mais en lisant les tables de métadonnées PE. Ainsi, des problèmes comme « le type cible n'est dans aucune assembly connue » ou « la forme d'injection est mal orthographiée » sont enregistrés et ignorés **tôt au démarrage**, sans attendre qu'une classe se charge avant d'exploser.
 
-**Failure isolation**: when a mod's rules fail to parse, the replacement class fails to load, or the entry `Init()` throws, only **that one mod** is marked as failed (status `Error`, shown as "load failed" on the MODS page) and the other mods load as usual. One wording needs correcting here: NC has **no runtime unloading** — mods are loaded once, and `ModManager` explicitly does not offer dynamic loading/unloading. So-called "auto-unload on failure" is actually **load-time isolation**: a failed mod is not initialized, but it is also not "unloaded".
+**Isolation des échecs** : quand les règles d'un mod ne parviennent pas à être analysées, que la classe de remplacement ne parvient pas à se charger, ou que le `Init()` d'entrée lève une exception, **seul ce mod** est marqué comme en échec (statut `Error`, affiché comme « échec de chargement » sur la page MODS) et les autres mods se chargent normalement. Une formulation mérite d'être corrigée ici : NC n'a **aucun déchargement à l'exécution** — les mods sont chargés une fois, et `ModManager` n'offre explicitement pas de chargement/déchargement dynamique. Le soi-disant « déchargement automatique en cas d'échec » est en réalité une **isolation au chargement** : un mod en échec n'est pas initialisé, mais il n'est pas non plus « déchargé ».
 
-**Dynamic injection**: on the ReJIT route from [2.6](#26-runtime-injection-modifying-already-running-code), the semantics of several mods competing for the same method match the static case — the first registered wins, and later requests are sent but cannot claim it (`GetReJITParameters` claims by "module + method", taking the first).
+**Injection dynamique** : sur la voie ReJIT de la section [2.6](#26-injection-à-lexécution--modifier-du-code-déjà-en-cours-dexécution), la sémantique de plusieurs mods se disputant la même méthode est la même que dans le cas statique — le premier enregistré gagne, et les requêtes ultérieures sont envoyées mais ne peuvent pas la revendiquer (`GetReJITParameters` revendique par « module + méthode », en prenant le premier).
 
-We hit a pitfall on this route once, worth recording: in an early implementation, `FindTypeRef`'s **resolution scope parameter was passed as `mdTokenNil`**, whose semantics are "match only TypeRefs with no resolution scope" — our references all hang off `AssemblyRef`, so the one we had built was never found. It manifested as: the first injection succeeded, but on the second injection reference resolution failed, no new method body could be built, the CLR fell back to the original IL, and **the first injection was lost along with it** (the target method reverted to its uninjected behavior). After the fix it no longer reproduced, but the limitation remains: **metadata injection of references must complete within the window right after the target module loads; the later it is, the more likely it fails**.
+Nous avons rencontré un piège sur cette voie une fois, qui mérite d'être noté : dans une implémentation précoce, le **paramètre de portée de résolution de `FindTypeRef` était passé à `mdTokenNil`**, dont la sémantique est « ne faire correspondre que les TypeRefs sans portée de résolution » — nos références pendent toutes à `AssemblyRef`, donc celle que nous avions construite n'était jamais trouvée. Cela se manifestait ainsi : la première injection réussissait, mais à la seconde injection la résolution des références échouait, aucun nouveau corps de méthode ne pouvait être construit, le CLR revenait à l'IL d'origine, et **la première injection était perdue avec lui** (la méthode cible revenait à son comportement non injecté). Après correction, le problème ne se reproduisait plus, mais la limitation demeure : **l'injection de références dans les métadonnées doit s'achever dans la fenêtre qui suit immédiatement le chargement du module cible ; plus tard c'est, plus l'échec est probable**.
 
-**The cost must be stated clearly**: NC's non-crashing behavior comes at the cost of conflicts being easily missed — Mixin at least interrupts loading, whereas NC lets the later one silently fail. To address this, assembly performs a **same-anchor conflict check**: when the same injection point is declared by multiple mods, the later-assembled one is recorded in `ModHooks.Warnings` and reported as a warning in the startup log (without blocking loading):
+**Le coût doit être dit clairement** : le comportement sans plantage de NC a pour prix des conflits facilement manqués — Mixin au moins interrompt le chargement, tandis que NC laisse la seconde échouer silencieusement. Pour y remédier, l'assemblage effectue une **vérification des conflits de même ancre** : quand le même point d'injection est déclaré par plusieurs mods, le dernier assemblé est consigné dans `ModHooks.Warnings` et signalé comme avertissement dans le journal de démarrage (sans bloquer le chargement) :
 
 ```
 Mod injection conflict mod my-mod-b's injection NetCraft.Game.Server.DedicatedServer::Tick[CallSite/ILRewrite] is already taken by mod my-mod-a; this rule will not take effect
 ```
 
-The detection key is "target type + method + injection form + patch mode". **Host scoping is not distinguished** — neither the manifest nor annotations can write `InType`/`InMethod`, so rules coming from mods are naturally whole-assembly in scope, and the same key means a collision. Rules added directly via the C# API bypass this check, since in that case two rules may each hit a different host and are inherently non-conflicting.
+La clé de détection est « type cible + méthode + forme d'injection + mode de patch ». **La portée d'hôte n'est pas distinguée** — ni le manifeste ni les annotations ne peuvent écrire `InType`/`InMethod`, donc les règles venant des mods ont naturellement une portée au niveau de l'assembly entière, et la même clé signifie une collision. Les règles ajoutées directement via l'API C# contournent cette vérification, puisque dans ce cas deux règles peuvent chacune toucher un hôte différent et sont par nature non conflictuelles.
 
-**Runtime injection goes through this check too**: it enters the same assembly entry point, and the patch mode in the detection key keeps it separate from load-time rewriting; when both types land on the same target assembly there is a separate overwrite notice (see [6.4](#64-two-mods-injecting-the-same-target)).
+**L'injection à l'exécution passe aussi par cette vérification** : elle entre par le même point d'entrée d'assemblage, et le mode de patch dans la clé de détection la garde séparée de la réécriture au chargement ; quand les deux types atterrissent sur la même assembly cible, il y a un avis d'écrasement distinct (voir [6.4](#64-deux-mods-injectant-la-même-cible)).
 
-### 2.8 Mixins: adding members to a target type
+### 2.8 Mixins : ajouter des membres à un type cible
 
-The previous sections all modify instructions in existing code and cannot create anything new. To **add fields, methods, or interfaces** to a target type, use a mixin.
+Les sections précédentes modifient toutes des instructions dans du code existant et ne peuvent rien créer de nouveau. Pour **ajouter des champs, des méthodes ou des interfaces** à un type cible, utilisez un mixin.
 
-The relationship to Mixin's syntax is as follows:
+La relation avec la syntaxe de Mixin est la suivante :
 
 | Mixin | NC |
 | --- | --- |
-| `@Mixin(X.class)` on the mixin class | `[Mixin(typeof(X))]` on the source class |
-| members of the mixin class are mixed into the target class | fields and methods of the source class are moved into the target type |
-| `@Unique` adds a private field | write an ordinary field in the source class; it is moved over the same way |
-| `@Shadow` references an existing member of the target class | not needed; write `X`'s members directly and then hook them |
+| `@Mixin(X.class)` sur la classe mixin | `[Mixin(typeof(X))]` sur la classe source |
+| les membres de la classe mixin sont mixés dans la classe cible | les champs et méthodes de la classe source sont déplacés dans le type cible |
+| `@Unique` ajoute un champ privé | écrivez un champ ordinaire dans la classe source ; il est déplacé de la même façon |
+| `@Shadow` référence un membre existant de la classe cible | pas nécessaire ; écrivez directement les membres de `X` puis hookez-les |
 | `@Implements` / `implements` | `Interfaces` |
 
-It can also be written in the manifest:
+Il peut aussi être écrit dans le manifeste :
 
 ```json
 {
@@ -360,79 +360,79 @@ It can also be written in the manifest:
 [Mixin(typeof(SomeEntity), Interfaces = new[] { typeof(ITagged) })]
 public class SomeEntityMixin
 {
-    //after being moved over, this is an instance field on the target type
+    //après déplacement, c'est un champ d'instance sur le type cible
     public int MyCounter = 5;
 
-    //a mixed-in method; it reads/writes the field moved along with it
+    //une méthode mixée ; elle lit/écrit le champ déplacé avec elle
     public int Bump() => MyCounter + 1;
 
-    //the implementation the interface requires; after being moved over the target type implements ITagged
+    //l'implémentation requise par l'interface ; après déplacement, le type cible implémente ITagged
     public string Describe() => $"tagged:{MyCounter}";
 }
 ```
 
-**Move, not copy**. These members are removed from the source class, leaving only an empty shell — just like Mixin's mixin class, **mod code should no longer use that class** (`new SomeEntityMixin()` or calling its methods will fail to find the members).
+**Déplacement, pas copie**. Ces membres sont retirés de la classe source, ne laissant qu'une coquille vide — tout comme la classe mixin de Mixin, **le code du mod ne doit plus utiliser cette classe** (`new SomeEntityMixin()` ou l'appel de ses méthodes ne trouveront pas les membres).
 
-A few landing rules:
+Quelques règles d'application :
 
-- **Only applies to load-time rewriting**. The target type must be in a kernel assembly or mod assembly that has not entered memory yet. Runtime injection only submits method bodies and cannot change type layout, so this form cannot exist on it.
-- **Constructor initializers come along**. Values written in the source class's field initializers are merged into every instance constructor of the target type; static field initializers are merged into the static constructor (created if the target has none). The base-class chaining call inside the source class's constructor is stripped, so the base constructor is not run twice.
-- **Rules with interfaces mark the moved public instance methods as virtual**. Interface dispatch only recognizes the vtable, and without the marker the CLR would determine the interface is not implemented and fail to load outright. So do not expect those methods to stay non-virtual when mixing in an interface.
-- **Same-named members are skipped**. When the target type already has a field or method with the same name, that one item is not moved and the rest proceed as usual. When two mods mix into the same target type, both land, and only the name-colliding part of the latter is skipped — gentler than the "latter fails entirely" behavior of hooks in [2.7](#27-do-two-mods-modifying-the-same-class-conflict-like-mixin).
-- **Nested types are not moved**, and nested types or generic methods in the source class are also currently outside this path's coverage.
+- **Ne s'applique qu'à la réécriture au chargement**. Le type cible doit être dans une assembly du noyau ou une assembly de mod qui n'est pas encore entrée en mémoire. L'injection à l'exécution ne soumet que des corps de méthode et ne peut pas changer la disposition du type, donc cette forme ne peut pas exister dessus.
+- **Les initialiseurs de constructeur suivent**. Les valeurs écrites dans les initialiseurs de champs de la classe source sont fusionnées dans chaque constructeur d'instance du type cible ; les initialiseurs de champs statiques sont fusionnés dans le constructeur statique (créé si la cible n'en a pas). L'appel d'enchaînement à la classe de base à l'intérieur du constructeur de la classe source est supprimé, donc le constructeur de base n'est pas exécuté deux fois.
+- **Les règles avec interfaces marquent comme virtuelles les méthodes d'instance publiques déplacées**. La distribution d'interface ne reconnaît que la vtable, et sans le marqueur le CLR conclurait que l'interface n'est pas implémentée et échouerait complètement au chargement. Donc ne vous attendez pas à ce que ces méthodes restent non virtuelles lors d'un mixage d'interface.
+- **Les membres de même nom sont ignorés**. Quand le type cible a déjà un champ ou une méthode du même nom, ce seul élément n'est pas déplacé et le reste se poursuit normalement. Quand deux mods se mixent dans le même type cible, les deux s'appliquent, et seule la partie de même nom du second est ignorée — plus doux que le comportement « le second échoue entièrement » des hooks de la section [2.7](#27-deux-mods-qui-modifient-la-même-classe-entrent-ils-en-conflit-comme-avec-mixin).
+- **Les types imbriqués ne sont pas déplacés**, et les types imbriqués ou méthodes génériques dans la classe source sont également hors de la couverture de ce chemin actuellement.
 
-The source type must be in **the mod's own assembly**, so neither the manifest nor the annotation writes an assembly name.
+Le type source doit être dans **l'assembly du mod lui-même**, donc ni le manifeste ni l'annotation n'écrivent de nom d'assembly.
 
-### 2.9 Two routes: wrapper layer and extension points
+### 2.9 Deux voies : couche wrapper et points d'extension
 
-`NetCraft.ModApi`'s public surface is split into two namespaces, corresponding to two usages:
+La surface publique de `NetCraft.ModApi` est répartie en deux espaces de noms, correspondant à deux usages :
 
-| Namespace | Contents | What you get |
+| Espace de noms | Contenu | Ce que vous obtenez |
 | --- | --- | --- |
-| `NetCraft.ModApi.Wrapper` | `ServerEvents` / `ClientEvents` / `NetworkEvents`, `NcServer` / `NcWorld` / `NcPlayers` / `NcLists` / `NcRegistries` / `NcRecipes` / `NcStartup`, and object handles like `NcPlayer` / `NcLevel` | wrapper types; no kernel types on the public surface |
-| `NetCraft.ModApi.Extension` | `[Inject]` / `[Mixin]` annotations | rules bind to kernel class and method names |
+| `NetCraft.ModApi.Wrapper` | `ServerEvents` / `ClientEvents` / `NetworkEvents`, `NcServer` / `NcWorld` / `NcPlayers` / `NcLists` / `NcRegistries` / `NcRecipes` / `NcStartup`, et des handles d'objets comme `NcPlayer` / `NcLevel` | types wrapper ; aucun type du noyau dans la surface publique |
+| `NetCraft.ModApi.Extension` | Annotations `[Inject]` / `[Mixin]` | les règles se lient aux noms de classes et de méthodes du noyau |
 
-The two are **parallel** routes, not one layered on top of the other:
+Les deux sont des voies **parallèles**, pas l'une superposée à l'autre :
 
-- **For stability, use `Wrapper`**. The facades handle the kernel's tedious call ordering for you (writing a single block while touching the level, the player list, and the sync chain is one example), and event args are all wrapper types. The cost is that capabilities the facades do not expose are unavailable to you.
-- **For completeness, use `Extension`**. Injection rules modify kernel classes and methods directly, but the target names you write are the kernel's names, so when the kernel changes the rules must change with it.
+- **Pour la stabilité, utilisez `Wrapper`**. Les façades gèrent pour vous l'ordre d'appel fastidieux du noyau (écrire un seul bloc tout en touchant le niveau, la liste des joueurs et la chaîne de synchronisation en est un exemple), et les arguments d'événements sont tous des types wrapper. Le coût est que les capacités que les façades n'exposent pas vous sont inaccessibles.
+- **Pour l'exhaustivité, utilisez `Extension`**. Les règles d'injection modifient directement les classes et méthodes du noyau, mais les noms de cibles que vous écrivez sont ceux du noyau, donc quand le noyau change, les règles doivent changer avec lui.
 
-You can reference both. The `Wrapper` line is being consolidated toward "no kernel types on the public surface"; the player and level parts are done — `Player` / `Attacker` in player events and the in/out parameters of `NcPlayers` are `NcPlayer` handles, `NcWorld.Overworld` / `Nether` / `End` / `Get` and `LevelTickArgs.Level` are `NcLevel` handles, and block coordinates are plain `x y z` ints; entities and the remaining value types (`BlockPos` / `BlockState` / `Vec3`) are not wrapped yet.
+Vous pouvez référencer les deux. La ligne `Wrapper` est en cours de consolidation vers « aucun type du noyau dans la surface publique » ; les parties joueur et niveau sont faites — `Player` / `Attacker` dans les événements joueur et les paramètres d'entrée/sortie de `NcPlayers` sont des handles `NcPlayer`, `NcWorld.Overworld` / `Nether` / `End` / `Get` et `LevelTickArgs.Level` sont des handles `NcLevel`, et les coordonnées de blocs sont de simples entiers `x y z` ; les entités et les types valeur restants (`BlockPos` / `BlockState` / `Vec3`) ne sont pas encore emballés.
 
-One more boundary to call out: **the wrapper layer does not shield injection**. The `hooks` rules or `[Inject]` annotations you write still bind to kernel class and method names, and break just the same when the kernel changes.
+Une limite de plus à signaler : **la couche wrapper ne protège pas de l'injection**. Les règles `hooks` ou les annotations `[Inject]` que vous écrivez se lient toujours aux noms de classes et de méthodes du noyau, et cassent tout autant quand le noyau change.
 
 ---
 
-## 3. Migrating from Fabric
+## 3. Migrer depuis Fabric
 
-### 3.1 Concept mapping
+### 3.1 Correspondance des concepts
 
 | Fabric | NetCraft |
 | --- | --- |
-| `fabric.mod.json` | the `ncmod.json` embedded in the dll |
-| `ModInitializer.onInitialize()` | the entry class's `public Task Init()` |
-| `@Inject` / `@Redirect` | the `[Inject]` annotation, or rules like `Mark` / `Probe` / `CallSite` in `hooks` |
-| `@ModifyVariable` | `LocalRead` / `LocalWrite`, see [2.5](#25-in-method-body-anchors-local-variables-and-constants); not writable as an annotation |
-| `@ModifyConstant` | `Constant`, see [2.5](#25-in-method-body-anchors-local-variables-and-constants); not writable as an annotation |
-| `@Accessor` | no equivalent yet (`private` members need no visibility widening; just write a rule) |
-| `Registry.register(...)` | the kernel registry (`BuiltInRegistries`) |
+| `fabric.mod.json` | le `ncmod.json` embarqué dans la dll |
+| `ModInitializer.onInitialize()` | la `public Task Init()` de la classe d'entrée |
+| `@Inject` / `@Redirect` | l'annotation `[Inject]`, ou des règles comme `Mark` / `Probe` / `CallSite` dans `hooks` |
+| `@ModifyVariable` | `LocalRead` / `LocalWrite`, voir la section [2.5](#25-ancres-dans-le-corps-de-méthode--variables-locales-et-constantes) ; non inscriptible en annotation |
+| `@ModifyConstant` | `Constant`, voir la section [2.5](#25-ancres-dans-le-corps-de-méthode--variables-locales-et-constantes) ; non inscriptible en annotation |
+| `@Accessor` | pas encore d'équivalent (les membres `private` n'ont pas besoin d'élargissement de visibilité ; écrivez simplement une règle) |
+| `Registry.register(...)` | le registre du noyau (`BuiltInRegistries`) |
 | `ServerLifecycleEvents.SERVER_STARTED` | `ServerEvents.Started` |
 | `ServerTickEvents.END_SERVER_TICK` | `ServerEvents.Tick` |
 | `CommandRegistrationCallback` | `ServerEvents.CommandRegister` |
 | `ClientTickEvents.END_CLIENT_TICK` | `ClientEvents.Tick` |
-| `FabricLoader.getInstance().getModContainer(id)` | no equivalent yet (`ModManager` is not open to mods) |
-| `@Mixin` / `@Unique` / `@Implements` | the `[Mixin]` annotation or the manifest's `mixins`, see [2.8](#28-mixins-adding-members-to-a-target-type) |
+| `FabricLoader.getInstance().getModContainer(id)` | pas encore d'équivalent (`ModManager` n'est pas ouvert aux mods) |
+| `@Mixin` / `@Unique` / `@Implements` | l'annotation `[Mixin]` ou les `mixins` du manifeste, voir la section [2.8](#28-mixins--ajouter-des-membres-à-un-type-cible) |
 
-### 3.2 What does not carry over
+### 3.2 Ce qui ne se transpose pas
 
-- **Mixin's annotation system**: NC has two annotations, `[Inject]` and `[Mixin]`, both of which are only **declaration styles**, equivalent to `hooks` / `mixins` in `ncmod.json` and merged at assembly (they are resolved by the loader, not `Lead.Hook`, see [2.1](#21-injection-styles-annotations-or-manifest-pick-one)). Instruction rewriting lands at load time by default, and can be changed to runtime submission per [2.6](#26-runtime-injection-modifying-already-running-code); adding members and interfaces goes through the mixins of [2.8](#28-mixins-adding-members-to-a-target-type). Targeting has no `@At`-style string syntax, but forms like `CallSite`/`FieldRead`/`LocalWrite`/`Constant`, together with `Ordinal`, `InType`/`InMethod`, and `Placement`, can cover the usages of `HEAD`/`RETURN`/`INVOKE`/`FIELD`/`NEW`/`CONSTANT`/`LOAD`/`STORE` and `shift`; what is missing is `JUMP`.
-- **AccessWidener**: none. Visibility is no obstacle to IL rewriting in NC; `private` methods can be hooked the same way (the rewriter works at the byte level).
-- **Yarn / Mojang mappings**: not needed. NC is C# source translated directly from vanilla, with type and method names corresponding to vanilla, only with naming style following C#.
-- **The vast majority of Fabric API modules**: only capabilities covered by `NetCraft-ModApi` are available; for the rest, write your own injection rules or wait for the API to catch up.
+- **Le système d'annotations de Mixin** : NC a deux annotations, `[Inject]` et `[Mixin]`, qui ne sont que des **styles de déclaration**, équivalents à `hooks` / `mixins` dans `ncmod.json` et fusionnées à l'assemblage (elles sont résolues par le loader, pas par `Lead.Hook`, voir [2.1](#21-styles-dinjection--annotations-ou-manifeste-choisissez-en-un)). La réécriture d'instructions s'applique au chargement par défaut, et peut être changée en soumission à l'exécution selon la section [2.6](#26-injection-à-lexécution--modifier-du-code-déjà-en-cours-dexécution) ; l'ajout de membres et d'interfaces passe par les mixins de la section [2.8](#28-mixins--ajouter-des-membres-à-un-type-cible). Le ciblage n'a pas de syntaxe de chaîne de type `@At`, mais des formes comme `CallSite`/`FieldRead`/`LocalWrite`/`Constant`, avec `Ordinal`, `InType`/`InMethod` et `Placement`, peuvent couvrir les usages de `HEAD`/`RETURN`/`INVOKE`/`FIELD`/`NEW`/`CONSTANT`/`LOAD`/`STORE` et `shift` ; ce qui manque est `JUMP`.
+- **AccessWidener** : aucun. La visibilité n'est pas un obstacle à la réécriture IL dans NC ; les méthodes `private` peuvent être hookées de la même façon (le rewriter travaille au niveau des octets).
+- **Mappings Yarn / Mojang** : pas nécessaires. NC est du source C# traduit directement depuis vanilla, avec des noms de types et de méthodes correspondant à vanilla, seul le style de nommage suivant C#.
+- **La grande majorité des modules de l'API Fabric** : seules les capacités couvertes par `NetCraft-ModApi` sont disponibles ; pour le reste, écrivez vos propres règles d'injection ou attendez que l'API rattrape son retard.
 
-### 3.3 A side-by-side example
+### 3.3 Un exemple côte à côte
 
-Fabric: log a line when the server starts and register a command.
+Fabric : journaliser une ligne au démarrage du serveur et enregistrer une commande.
 
 ```java
 public class MyMod implements ModInitializer {
@@ -449,7 +449,7 @@ public class MyMod implements ModInitializer {
 }
 ```
 
-NC:
+NC :
 
 ```csharp
 public sealed class MyModEntry
@@ -469,7 +469,7 @@ public sealed class MyModEntry
 }
 ```
 
-Manifest (`ncmod.json`, as an embedded resource):
+Manifeste (`ncmod.json`, comme ressource embarquée) :
 
 ```json
 {
@@ -481,28 +481,28 @@ Manifest (`ncmod.json`, as an embedded resource):
 }
 ```
 
-Note: even an empty `hooks` works here — events like `ServerEvents.Started` are provided by `NetCraft-ModApi`'s own probes, and your mod only needs to subscribe (`ServerEvents` is under `NetCraft.ModApi.Wrapper`, see [2.9](#29-two-routes-wrapper-layer-and-extension-points)). You only need to write your own hook rules when you want to hook a place in the kernel where ModApi does not yet provide an event.
+Remarque : même un `hooks` vide fonctionne ici — des événements comme `ServerEvents.Started` sont fournis par les sondes de `NetCraft-ModApi` lui-même, et votre mod n'a qu'à s'abonner (`ServerEvents` est sous `NetCraft.ModApi.Wrapper`, voir [2.9](#29-deux-voies--couche-wrapper-et-points-dextension)). Vous n'avez besoin d'écrire vos propres règles de hook que lorsque vous voulez hooker un endroit du noyau où ModApi ne fournit pas encore d'événement.
 
 ---
 
-## 4. Basic requirements for an ncm
+## 4. Exigences de base pour un ncm
 
-ncm means NetCraft mod. An ncm is a .NET class library dll embedding an `ncmod.json`, placed in the `mods/` directory.
+ncm signifie mod NetCraft. Un ncm est une dll de bibliothèque de classes .NET embarquant un `ncmod.json`, placée dans le répertoire `mods/`.
 
-The easiest way to start is the template:
+La façon la plus simple de commencer est le modèle :
 
 ```
 dotnet new install NetCraft.ModsProjectType
 dotnet new ncm -n MyMod -e server
 ```
 
-If the local package has not been published yet, use `dotnet new install <nupkg path>`, or run `dotnet pack` in the repository and then install the output.
+Si le paquet local n'a pas encore été publié, utilisez `dotnet new install <chemin du nupkg>`, ou exécutez `dotnet pack` dans le dépôt puis installez la sortie.
 
-`-e` takes `both` (default) / `server` / `client`, determining the manifest's `environment` and which side's subscription code is generated in the entry class. The template ships the NC reference assemblies, so no project reference is needed, and `ncmod.json`'s id / entry are filled in from the project name.
+`-e` prend `both` (par défaut) / `server` / `client`, déterminant l'`environment` du manifeste et quel code d'abonnement côté est généré dans la classe d'entrée. Le modèle fournit les assemblies de référence NC, donc aucune référence de projet n'est nécessaire, et les id / entry de `ncmod.json` sont renseignés à partir du nom du projet.
 
-Starting at 4.1, the following covers what a hand-written project must satisfy.
+À partir de la section 4.1, ce qui suit couvre ce qu'un projet écrit à la main doit respecter.
 
-### 4.1 Project file
+### 4.1 Fichier de projet
 
 ```xml
 <Project Sdk="Microsoft.NET.Sdk">
@@ -513,7 +513,7 @@ Starting at 4.1, the following covers what a hand-written project must satisfy.
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Private must be turned off, otherwise the NC assemblies get embedded into the mod dll by EmbedDependencies in 4.6 -->
+    <!-- Private doit être désactivé, sinon les assemblies NC sont embarquées dans la dll du mod par EmbedDependencies en 4.6 -->
     <ProjectReference Include="xxx\NetCraft\NetCraft.csproj" Private="false" />
     <ProjectReference Include="xxx\NetCraft.ModApi\NetCraft.ModApi.csproj" Private="false" />
   </ItemGroup>
@@ -524,11 +524,11 @@ Starting at 4.1, the following covers what a hand-written project must satisfy.
 </Project>
 ```
 
-`LogicalName` must be `ncmod.json`; the scanner recognizes only that name.
+`LogicalName` doit être `ncmod.json` ; le scanner ne reconnaît que ce nom.
 
-The template takes a different route: assembly references under `libs/` (`Reference Include="libs\*.dll" Private="false"`). Follow that when you do not have the NC source. What both approaches share is that **NC's own dlls must never enter the output directory** — `EmbedDependencies` from [4.6](#46-third-party-dependencies) embeds third-party dlls from the output directory into the mod, and if NC's assemblies get embedded too there will be two sets of type identity.
+Le modèle prend une voie différente : des références d'assemblies sous `libs/` (`Reference Include="libs\*.dll" Private="false"`). Suivez-la lorsque vous n'avez pas le source de NC. Ce que les deux approches ont en commun est que **les dll propres à NC ne doivent jamais entrer dans le répertoire de sortie** — `EmbedDependencies` de la section [4.6](#46-dépendances-tierces) embarque les dll tierces du répertoire de sortie dans le mod, et si les assemblies de NC sont embarquées elles aussi, il y aura deux ensembles d'identité de type.
 
-### 4.2 ncmod.json fields
+### 4.2 Champs de ncmod.json
 
 ```json
 {
@@ -546,23 +546,23 @@ The template takes a different route: assembly references under `libs/` (`Refere
 }
 ```
 
-| Field | Required | Notes |
+| Champ | Requis | Remarques |
 | --- | --- | --- |
-| `id` | Yes | mod identifier, used by dependencies and lookups. An empty string is skipped by the scanner |
-| `version` | Recommended | version number; when depended on by other mods, version constraints are judged by it, see below |
-| `name` | No | display name; this is what the mod page shows, defaulting back to `id` |
-| `description` | No | one-line description |
-| `authors` / `contributors` | No | credits, a string array |
-| `license` | No | license identifier |
-| `contact` | No | external links; may take `homepage` / `sources` / `issues` |
-| `icon` | No | the icon's embedded resource name, see 4.7 |
-| `environment` | No | `both` / `client` / `server`, default `both`. When it does not match the current side the whole mod is not loaded |
-| `entry` | Yes | full name of the entry class; the class must have `public Task Init()` |
-| `depends` | No | other mods it depends on and required versions, see below |
-| `hooks` | No | list of injection rules; an empty array means subscribing only to events ModApi already has |
-| `mixins` | No | list of mixin rules; moves members of one of this mod's classes into the target type, see [2.8](#28-mixins-adding-members-to-a-target-type) |
+| `id` | Oui | identifiant du mod, utilisé par les dépendances et les recherches. Une chaîne vide est ignorée par le scanner |
+| `version` | Recommandé | numéro de version ; quand d'autres mods en dépendent, les contraintes de version sont jugées par lui, voir ci-dessous |
+| `name` | Non | nom d'affichage ; c'est ce que montre la page du mod, par défaut `id` |
+| `description` | Non | description sur une ligne |
+| `authors` / `contributors` | Non | crédits, un tableau de chaînes |
+| `license` | Non | identifiant de licence |
+| `contact` | Non | liens externes ; peut prendre `homepage` / `sources` / `issues` |
+| `icon` | Non | le nom de la ressource embarquée de l'icône, voir 4.7 |
+| `environment` | Non | `both` / `client` / `server`, par défaut `both`. Quand il ne correspond pas au côté courant, tout le mod n'est pas chargé |
+| `entry` | Oui | nom complet de la classe d'entrée ; la classe doit avoir `public Task Init()` |
+| `depends` | Non | autres mods dont il dépend et versions requises, voir ci-dessous |
+| `hooks` | Non | liste de règles d'injection ; un tableau vide signifie ne s'abonner qu'aux événements que ModApi possède déjà |
+| `mixins` | Non | liste de règles mixin ; déplace les membres d'une des classes de ce mod dans le type cible, voir la section [2.8](#28-mixins--ajouter-des-membres-à-un-type-cible) |
 
-`depends` declares other mods it depends on and required versions; the key is a mod id and the value is a version constraint:
+`depends` déclare les autres mods dont il dépend et les versions requises ; la clé est un id de mod et la valeur une contrainte de version :
 
 ```json
 {
@@ -573,34 +573,34 @@ The template takes a different route: assembly references under `libs/` (`Refere
 }
 ```
 
-**Dependencies not written into `depends` carry no version constraint**. Inter-mod dependencies are already inferred automatically from compile-time references (see [6.1](#61-mod-dependency--injecting-the-depended-on-mod)), and `depends` only adds version constraints on top. When the depended-on mod is not on the current side the check is skipped — that case is left to assembly resolution to report.
+**Les dépendances non écrites dans `depends` ne portent aucune contrainte de version**. Les dépendances entre mods sont déjà déduites automatiquement des références à la compilation (voir la section [6.1](#61-dépendance-entre-mods--injection-du-mod-dont-on-dépend)), et `depends` ne fait qu'ajouter des contraintes de version par-dessus. Quand le mod dont on dépend n'est pas du côté courant, la vérification est ignorée — ce cas est laissé à la résolution d'assemblies pour le signaler.
 
-| Constraint syntax | Meaning |
+| Syntaxe de contrainte | Signification |
 | --- | --- |
-| `*` | any version, equivalent to omitting the entry |
-| `1.2.3` | segment prefix; `1.2` matches `1.2` and `1.2.9` but not `1.3` |
-| `^1.2.3` | same major version and not less than the baseline; when the major version is 0 the minor version is used instead, so `0.1` and `0.2` count as incompatible |
-| `>=1.2.3` | not less than the baseline |
+| `*` | n'importe quelle version, équivalent à omettre l'entrée |
+| `1.2.3` | préfixe de segment ; `1.2` correspond à `1.2` et `1.2.9` mais pas à `1.3` |
+| `^1.2.3` | même version majeure et pas inférieure à la base ; quand la version majeure est 0, la version mineure est utilisée à la place, donc `0.1` et `0.2` sont considérées incompatibles |
+| `>=1.2.3` | pas inférieure à la base |
 
-Version numbers take only the leading digits of each segment, so `26.2-netcraft` participates as `26.2`. When versions do not match, **only the declaring mod is skipped** and the rest load as usual; the startup log states "dependency X requires version …, actual version …".
+Les numéros de version ne prennent que les chiffres de tête de chaque segment, donc `26.2-netcraft` participe en tant que `26.2`. Quand les versions ne correspondent pas, **seul le mod déclarant est ignoré** et le reste se charge normalement ; le journal de démarrage indique « la dépendance X requiert la version …, version réelle … ».
 
-The judgment basis is the `version` field in the depended-on mod's manifest. So **a mod intended to be depended on must set `version` correctly** — an empty version number satisfies no specific constraint.
+La base du jugement est le champ `version` du manifeste du mod dont on dépend. Donc **un mod destiné à être une dépendance doit définir correctement `version`** — un numéro de version vide ne satisfait aucune contrainte spécifique.
 
-### 4.3 hook rule fields
+### 4.3 Champs d'une règle de hook
 
-| Field | Notes |
+| Champ | Remarques |
 | --- | --- |
-| `target` | full name of the target type; must be in a kernel assembly or one of the mod assemblies under `mods/` |
-| `method` | target method name; same-name overloads all match |
-| `type` | injection form, see the appendix |
-| `patchMode` | landing method, `ILRewrite` (default) or `RuntimeInject`, see [2.6](#26-runtime-injection-modifying-already-running-code) |
-| `ordinal` | when the same anchor matches multiple places in the host method, pick which, 0-based, see [2.4](#24-narrowing-to-one-site-host-scoping-and-placement) |
-| `replaceType` | full name of the class containing the replacement method |
-| `replaceMethod` | replacement method name |
-| `label` | probe label, used only by `Mark` and `Probe` |
-| `environment` | the side the rule applies to, default `both`; a rule targeting a server type run on the client has no target at all and is filtered out by `environment` |
+| `target` | nom complet du type cible ; doit se trouver dans une assembly du noyau ou l'une des assemblies de mods sous `mods/` |
+| `method` | nom de la méthode cible ; les surcharges de même nom correspondent toutes |
+| `type` | forme d'injection, voir l'annexe |
+| `patchMode` | méthode d'application, `ILRewrite` (par défaut) ou `RuntimeInject`, voir la section [2.6](#26-injection-à-lexécution--modifier-du-code-déjà-en-cours-dexécution) |
+| `ordinal` | quand la même ancre correspond à plusieurs endroits dans la méthode hôte, choisir lequel, base 0, voir la section [2.4](#24-se-restreindre-à-un-seul-site--portée-de-lhôte-et-placement) |
+| `replaceType` | nom complet de la classe contenant la méthode de remplacement |
+| `replaceMethod` | nom de la méthode de remplacement |
+| `label` | label de la sonde, utilisé uniquement par `Mark` et `Probe` |
+| `environment` | le côté auquel la règle s'applique, par défaut `both` ; une règle ciblant un type serveur exécutée sur le client n'a pas de cible du tout et est filtrée par `environment` |
 
-The same rule can also be written as an annotation on the replacement method; the correspondence is:
+La même règle peut aussi être écrite comme annotation sur la méthode de remplacement ; la correspondance est :
 
 ```csharp
 [Inject(typeof(SomeType), nameof(SomeType.SomeMethod),
@@ -608,45 +608,45 @@ The same rule can also be written as an annotation on the replacement method; th
 public static void OnSomeMethod(object self) { }
 ```
 
-| Manifest field | Annotation form |
+| Champ du manifeste | Forme en annotation |
 | --- | --- |
-| `target` | the first constructor parameter, written as `typeof(...)` |
-| `method` | the second constructor parameter, preferably `nameof(...)` |
-| `type` | named parameter `HookType`, default `CallSite` |
-| `patchMode` | named parameter `PatchMode`, default `ILRewrite` |
-| `ordinal` | named parameter `Ordinal` |
-| `label` | named parameter `Label` |
-| `environment` | named parameter `Environment`, default `both` |
-| `replaceType` | not written; taken automatically from the class it annotates |
-| `replaceMethod` | not written; taken automatically from the method it annotates |
+| `target` | le premier paramètre du constructeur, écrit comme `typeof(...)` |
+| `method` | le second paramètre du constructeur, de préférence `nameof(...)` |
+| `type` | paramètre nommé `HookType`, par défaut `CallSite` |
+| `patchMode` | paramètre nommé `PatchMode`, par défaut `ILRewrite` |
+| `ordinal` | paramètre nommé `Ordinal` |
+| `label` | paramètre nommé `Label` |
+| `environment` | paramètre nommé `Environment`, par défaut `both` |
+| `replaceType` | non écrit ; pris automatiquement depuis la classe qu'il annote |
+| `replaceMethod` | non écrit ; pris automatiquement depuis la méthode qu'il annote |
 
-The annotations come from `InjectAttribute` in `NetCraft.ModApi.Extension`, so mods using annotations must reference it. When annotations and the manifest both exist they are merged, and if the same injection point is declared in both **the annotation wins**.
+Les annotations viennent de `InjectAttribute` dans `NetCraft.ModApi.Extension`, donc les mods qui utilisent les annotations doivent le référencer. Quand annotations et manifeste coexistent, ils sont fusionnés, et si le même point d'injection est déclaré dans les deux, **l'annotation gagne**.
 
-Mixin rules use a different set of fields: `target` (full name of the target type), `source` (full name of the source type, which must be in the mod's own assembly), `interfaces` (optional, an array of interface full names); for semantics see [2.8](#28-mixins-adding-members-to-a-target-type). `[Mixin(typeof(target))]` on the source class is equivalent to the manifest entry.
+Les règles mixin utilisent un ensemble de champs différent : `target` (nom complet du type cible), `source` (nom complet du type source, qui doit être dans l'assembly du mod lui-même), `interfaces` (optionnel, un tableau de noms complets d'interfaces) ; pour la sémantique, voir la section [2.8](#28-mixins--ajouter-des-membres-à-un-type-cible). `[Mixin(typeof(target))]` sur la classe source équivaut à l'entrée du manifeste.
 
-### 4.4 What can and cannot be hooked
+### 4.4 Ce qui peut et ne peut pas être hooké
 
-Can be hooked: kernel assemblies under `kernel/`, and other mods under `mods/`.
+Peut être hooké : les assemblies du noyau sous `kernel/`, et les autres mods sous `mods/`.
 
-Cannot be hooked:
+Ne peut pas être hooké :
 
-- the main library `NetCraft.dll`
-- the loader `NetCraft.ModLoader.dll`
-- entry assemblies (`NetCraft.Server.Exe.dll`, etc.)
+- la bibliothèque principale `NetCraft.dll`
+- le loader `NetCraft.ModLoader.dll`
+- les assemblies d'entrée (`NetCraft.Server.Exe.dll`, etc.)
 
-Every hook's `target` must be findable in the kernel or in some mod assembly, otherwise assembly reports "the injection target is not in any known assembly". Note that **a namespace does not imply an assembly** — `NetCraft.Game.Server.DedicatedServer` actually lives in `NetCraft.Server.dll`; the loader looks it up by an index built from metadata tables, so just write the full name.
+Le `target` de chaque hook doit être trouvable dans le noyau ou dans une assembly de mod, sinon l'assemblage signale « la cible d'injection n'est dans aucune assembly connue ». Notez qu'**un espace de noms n'implique pas une assembly** — `NetCraft.Game.Server.DedicatedServer` vit en réalité dans `NetCraft.Server.dll` ; le loader le recherche via un index construit à partir des tables de métadonnées, donc écrivez simplement le nom complet.
 
-Mod injection of mods follows the same system: the target mod is rewritten **the moment it is itself loaded**, regardless of the order in `mods/`. Cyclic rules (A injects B and B injects A) report "cyclic loading" at load time; such rules have no solution at the IL rewriting level, so just remove one of them.
+L'injection de mods par des mods suit le même système : le mod cible est réécrit **à l'instant où il est lui-même chargé**, quel que soit l'ordre dans `mods/`. Les règles cycliques (A injecte B et B injecte A) signalent « chargement cyclique » au moment du chargement ; de telles règles n'ont pas de solution au niveau de la réécriture IL, donc retirez simplement l'une d'elles.
 
-Note the injected mod **cannot be your own mod** — self-injection also counts as a cycle.
+Notez que le mod injecté **ne peut pas être votre propre mod** — l'auto-injection compte aussi comme un cycle.
 
-### 4.5 Deployment
+### 4.5 Déploiement
 
-Copy the compiled dll into the output directory's `mods/` (top level, no subdirectory recursion) and restart the process.
+Copiez la dll compilée dans le `mods/` du répertoire de sortie (au premier niveau, sans récursion dans les sous-répertoires) et redémarrez le processus.
 
-**This step is already automated by the build**: `DeployModToHosts` in `NetCraft.ModApi.csproj` copies the dll into the `mods/` directory of each host project's output directory after building. The host list is the `ModHostProjects` property; when creating your own host project, just add its name. If no rule takes effect and there is no error at all, first check whether the dll in the host project's `mods/` is stale.
+**Cette étape est déjà automatisée par la compilation** : `DeployModToHosts` dans `NetCraft.ModApi.csproj` copie la dll dans le répertoire `mods/` du répertoire de sortie de chaque projet hôte après la compilation. La liste des hôtes est la propriété `ModHostProjects` ; lorsque vous créez votre propre projet hôte, ajoutez simplement son nom. Si aucune règle ne prend effet et qu'il n'y a aucune erreur, vérifiez d'abord si la dll dans le `mods/` du projet hôte est obsolète.
 
-The startup log prints:
+Le journal de démarrage affiche :
 
 ```
 Rewrote and preloaded assembly NetCraft.Server
@@ -655,26 +655,26 @@ Mod scan finished: 1 found, injection targets NetCraft.Server,NetCraft.Game runt
 Mod init finished: 1 loaded, 0 skipped
 ```
 
-Troubleshooting order:
+Ordre de dépannage :
 
-- No rule takes effect: first check whether the dll in `mods/` is stale (most common).
-- If you do not see `Rewrote and preloaded assembly`, the target assembly was already loaded before the bootstrap, so the rule was written too late.
-- If you see `injection targets` but the target is wrong, it is usually a mistyped `target`; follow [4.4](#44-what-can-and-cannot-be-hooked) to check which assembly the type belongs to.
-- A rule with `environment` set to `client` is silently skipped on the server (a mismatch at the mod level means the whole mod is not loaded); this is expected behavior, not a fault.
+- Aucune règle ne prend effet : vérifiez d'abord si la dll dans `mods/` est obsolète (le plus courant).
+- Si vous ne voyez pas `Rewrote and preloaded assembly`, l'assembly cible était déjà chargée avant le bootstrap, donc la règle a été écrite trop tard.
+- Si vous voyez `injection targets` mais que la cible est erronée, c'est généralement un `target` mal saisi ; suivez la section [4.4](#44-ce-qui-peut-et-ne-peut-pas-être-hooké) pour vérifier à quelle assembly appartient le type.
+- Une règle avec `environment` défini à `client` est silencieusement ignorée sur le serveur (une incompatibilité au niveau du mod signifie que tout le mod n'est pas chargé) ; c'est un comportement attendu, pas un défaut.
 
-### 4.6 Third-party dependencies
+### 4.6 Dépendances tierces
 
-Corresponds to Fabric's Jar-in-Jar.
+Correspond au Jar-in-Jar de Fabric.
 
-Projects created from the template **do not need to worry about this**: libraries added via `dotnet add package` are automatically embedded into the mod dll at build time, and when the loader cannot resolve an assembly it looks through the mod's embedded `.dll` resources.
+Les projets créés à partir du modèle **n'ont pas à s'en soucier** : les bibliothèques ajoutées via `dotnet add package` sont automatiquement embarquées dans la dll du mod à la compilation, et quand le loader ne peut pas résoudre une assembly, il parcourt les ressources `.dll` embarquées du mod.
 
 ```
 dotnet add package Newtonsoft.Json
 ```
 
-That's all; `ncmod.json` needs no changes.
+C'est tout ; `ncmod.json` n'a besoin d'aucun changement.
 
-A hand-written project must copy the `EmbedDependencies` target from the template csproj, or embed it yourself:
+Un projet écrit à la main doit copier la cible `EmbedDependencies` du csproj du modèle, ou l'embarquer lui-même :
 
 ```xml
 <ItemGroup>
@@ -682,21 +682,21 @@ A hand-written project must copy the `EmbedDependencies` target from the templat
 </ItemGroup>
 ```
 
-Dependencies are not written into the manifest; resolution only looks at the mod's embedded `.dll` resources, and it just needs the resource name to match the assembly name.
+Les dépendances ne sont pas écrites dans le manifeste ; la résolution ne regarde que les ressources `.dll` embarquées du mod, et il suffit que le nom de la ressource corresponde au nom de l'assembly.
 
-Three notes:
+Trois remarques :
 
-- **Matching is by assembly name**. The loader compares the requested assembly name: after removing `.dll`, the resource name either equals the assembly name or ends with `.` + the assembly name. So both `MyLib.dll` and the default `MyProject.deps.MyLib.dll` work.
-- **Only the mod's own embedded resources are recognized**. Libraries not embedded cannot be resolved and will not be searched for elsewhere.
-- **Resolution order is kernel first**. `EmbeddedAssemblyLoader` looks among kernel assemblies and embedded sub-libraries first, and only falls back to mods if nothing is found, so mods should not embed assemblies with the same name as kernel ones.
+- **La correspondance se fait par nom d'assembly**. Le loader compare le nom d'assembly demandé : après suppression de `.dll`, le nom de ressource soit égale au nom d'assembly, soit se termine par `.` + le nom d'assembly. Donc `MyLib.dll` et le `MyProject.deps.MyLib.dll` par défaut fonctionnent tous les deux.
+- **Seules les ressources embarquées du mod lui-même sont reconnues**. Les bibliothèques non embarquées ne peuvent pas être résolues et ne seront pas recherchées ailleurs.
+- **L'ordre de résolution met le noyau en premier**. `EmbeddedAssemblyLoader` cherche d'abord parmi les assemblies du noyau et les sous-bibliothèques embarquées, et ne se rabat sur les mods que si rien n'est trouvé, donc les mods ne devraient pas embarquer d'assemblies portant le même nom que celles du noyau.
 
-The template's target uses `WithMetadataValue` to filter `.dll` rather than writing `Condition`, because the template engine evaluates `Condition` in `.csproj` at template time, when `%(...)` has no value, and the whole line would be deleted.
+La cible du modèle utilise `WithMetadataValue` pour filtrer les `.dll` plutôt que d'écrire `Condition`, parce que le moteur de modèles évalue `Condition` dans le `.csproj` au moment du modèle, quand `%(...)` n'a pas de valeur, et la ligne entière serait supprimée.
 
-### 4.7 Icon and display info
+### 4.7 Icône et informations d'affichage
 
-Name, description, authors, links, and icon are all written in `ncmod.json`, corresponding to `name` / `description` / `authors` / `contact` / `icon` in vanilla's `fabric.mod.json`.
+Le nom, la description, les auteurs, les liens et l'icône sont tous écrits dans `ncmod.json`, correspondant à `name` / `description` / `authors` / `contact` / `icon` dans le `fabric.mod.json` de vanilla.
 
-**The icon is an embedded resource**, not an external file, using the same resource-naming convention as embedded dependencies:
+**L'icône est une ressource embarquée**, pas un fichier externe, utilisant la même convention de nommage de ressources que les dépendances embarquées :
 
 ```xml
 <ItemGroup>
@@ -708,149 +708,149 @@ Name, description, authors, links, and icon are all written in `ncmod.json`, cor
 { "icon": "icon.png" }
 ```
 
-The template already ships an `icon.png` with both places configured; just replace that image. A 64×64 or 128×128 PNG is recommended.
+Le modèle fournit déjà un `icon.png` avec les deux emplacements configurés ; remplacez simplement cette image. Un PNG de 64×64 ou 128×128 est recommandé.
 
-The icon lookup order is: what the manifest's `icon` points to → an embedded resource named `icon.png` → if neither exists, the UI's default image (a gray question mark).
+L'ordre de recherche de l'icône est : ce vers quoi pointe l'`icon` du manifeste → une ressource embarquée nommée `icon.png` → si aucune des deux n'existe, l'image par défaut de l'interface (un point d'interrogation gris).
 
-This information is visible on the **MODS** page of the server GUI. On the left is the mod list (small icon + display name + version + status); on the right are the description, credits, links, dependencies, initialization time, and injection rules of the selected one. Mod names in the dependency column are clickable and jump straight to that entry.
+Ces informations sont visibles sur la page **MODS** de l'interface graphique du serveur. À gauche se trouve la liste des mods (petite icône + nom d'affichage + version + statut) ; à droite se trouvent la description, les crédits, les liens, les dépendances, le temps d'initialisation et les règles d'injection de celui qui est sélectionné. Les noms de mods dans la colonne des dépendances sont cliquables et sautent directement à cette entrée.
 
-Mods that failed to load or were skipped are also in the list, marked in the status column — when diagnosing "why did my mod not take effect", check this column first.
-
----
-
-## 5. Known limitations
-
-- **Probe signatures may only use BCL types and `object`**, for the reason in 2.2; value-type parameters and return values are exceptions and must keep their real types.
-- **`CallSite` is a replacement**, and the replacement method must restore the original call itself, see 2.3. Private methods cannot be restored and require reflection.
-- **Dlls under `mods/` are deployed automatically by `DeployModToHosts`**; when creating your own host project, remember to add its name to `ModHostProjects`.
-- **Entry assemblies cannot be injected**: if your target and hook fall in an entry assembly, it is ineffective.
-- **The main library and loader cannot be hooked**; this is a design constraint preventing mods from changing the loading process itself.
-- **Mismatched `environment` means the whole mod is not loaded**, not "some rules fail".
-- **Runtime injection requires the native library**: rules using `RuntimeInject` require `lead_hook_native` to be attached at process start, and the loader restarts itself to do so; if the library is not found or the restart fails, this batch of rules is downgraded to a warning and startup is not blocked. For capability boundaries and cost see [2.6](#26-runtime-injection-modifying-already-running-code).
-- **Annotations have fewer fields than the C# API**: `InType` / `InMethod` / `Placement` / `LocalIndex` / `ConstantValue` cannot be written in `[Inject]` (`PatchMode` and `Ordinal` are supported), see [2.1](#21-injection-styles-annotations-or-manifest-pick-one).
-- **Mixins apply only to load-time rewriting**, and members in the source class are moved rather than copied; nested types and generic methods in the source class are outside coverage, and methods mixed in with an interface are marked virtual. See [2.8](#28-mixins-adding-members-to-a-target-type).
-- When testing and debugging, if language tables or model resources are used, an `assets` directory (extracted from the vanilla jar) is required, otherwise the related features degrade to translation keys or placeholder textures.
+Les mods qui ont échoué au chargement ou qui ont été ignorés sont aussi dans la liste, marqués dans la colonne des statuts — lorsque vous diagnostiquez « pourquoi mon mod n'a-t-il pas pris effet », consultez d'abord cette colonne.
 
 ---
 
-## 6. Known behaviors
+## 5. Limitations connues
 
-This section is a record of observed behavior, not a specification.
+- **Les signatures de sonde ne peuvent utiliser que des types BCL et `object`**, pour la raison exposée en 2.2 ; les paramètres et valeurs de retour de types valeur font exception et doivent garder leurs types réels.
+- **`CallSite` est un remplacement**, et la méthode de remplacement doit restaurer elle-même l'appel d'origine, voir 2.3. Les méthodes privées ne peuvent pas être restaurées et nécessitent la réflexion.
+- **Les dll sous `mods/` sont déployées automatiquement par `DeployModToHosts`** ; lorsque vous créez votre propre projet hôte, pensez à ajouter son nom à `ModHostProjects`.
+- **Les assemblies d'entrée ne peuvent pas être injectées** : si votre cible et votre hook tombent dans une assembly d'entrée, c'est sans effet.
+- **La bibliothèque principale et le loader ne peuvent pas être hookés** ; c'est une contrainte de conception empêchant les mods de modifier le processus de chargement lui-même.
+- **Un `environment` incompatible signifie que tout le mod n'est pas chargé**, pas que « certaines règles échouent ».
+- **L'injection à l'exécution exige la bibliothèque native** : les règles utilisant `RuntimeInject` exigent que `lead_hook_native` soit attachée au démarrage du processus, et le loader se redémarre pour ce faire ; si la bibliothèque n'est pas trouvée ou si le redémarrage échoue, ce lot de règles est dégradé en avertissement et le démarrage n'est pas bloqué. Pour les limites de capacité et le coût, voir la section [2.6](#26-injection-à-lexécution--modifier-du-code-déjà-en-cours-dexécution).
+- **Les annotations ont moins de champs que l'API C#** : `InType` / `InMethod` / `Placement` / `LocalIndex` / `ConstantValue` ne peuvent pas être écrits dans `[Inject]` (`PatchMode` et `Ordinal` sont pris en charge), voir la section [2.1](#21-styles-dinjection--annotations-ou-manifeste-choisissez-en-un).
+- **Les mixins ne s'appliquent qu'à la réécriture au chargement**, et les membres de la classe source sont déplacés plutôt que copiés ; les types imbriqués et les méthodes génériques de la classe source sont hors couverture, et les méthodes mixées avec une interface sont marquées virtuelles. Voir la section [2.8](#28-mixins--ajouter-des-membres-à-un-type-cible).
+- Lors des tests et du débogage, si des tables de langue ou des ressources de modèles sont utilisées, un répertoire `assets` (extrait du jar vanilla) est requis, sinon les fonctionnalités liées se dégradent en clés de traduction ou en textures de substitution.
 
-### 6.1 Mod dependency + injecting the depended-on mod
+---
 
-**Scenario**: b depends on a and also injects a.
+## 6. Comportements connus
 
-**Conclusion**: it works and does not form a cycle.
+Cette section est un compte rendu de comportements observés, pas une spécification.
 
-The chain has three steps:
+### 6.1 Dépendance entre mods + injection du mod dont on dépend
 
-1. The rule table is built purely by reading PE metadata, without loading any assembly. The rule "b injects a" requires neither a nor b to be present.
-2. `PreloadReplacers` loads all replacement classes (including b) before `ModManager`, at which point a is not loaded yet. `LoadFromStream` reads metadata only and does not JIT method bodies, so b's reference to a is lazy at this moment and loading does not fail.
-3. `ModManager` then topologically sorts by `AssemblyRef`, with a before b. When rewriting a, the replacement class b is already in `Default`, so the type is fetched directly and one `AssemblyRef` pointing to b is added to a's metadata. **a does not need to know b exists at all.**
+**Scénario** : b dépend de a et injecte aussi a.
 
-**Hard requirement**: when referencing the injected mod in csproj, you must write `Private="false"`. By default it copies `a.dll` into the output directory, which is then embedded into `b.dll` by `EmbedDependencies` as an embedded dependency, and at runtime `ModLibs` resolving `a` picks up the second copy, causing type identity checks between the two to fail.
+**Conclusion** : cela fonctionne et ne forme pas de cycle.
 
-**Verification case**: two template projects `NetCraft.Test1` (a) and `NetCraft.Test2` (b); a provides `Test1Api.Greet` and calls it in its own `ModEntry.Server`, while b replaces that call site with `Test2Probe.OnGreet` and also calls `Greet` once in b's `ModEntry.Server` as a control. Actual run log:
+La chaîne comporte trois étapes :
+
+1. La table de règles est construite purement en lisant les métadonnées PE, sans charger aucune assembly. La règle « b injecte a » n'exige que ni a ni b soient présents.
+2. `PreloadReplacers` charge toutes les classes de remplacement (y compris b) avant `ModManager`, moment où a n'est pas encore chargé. `LoadFromStream` ne lit que les métadonnées et ne compile pas par JIT les corps de méthode, donc la référence de b à a est paresseuse à ce moment et le chargement n'échoue pas.
+3. `ModManager` trie ensuite topologiquement par `AssemblyRef`, avec a avant b. Au moment de réécrire a, la classe de remplacement b est déjà dans `Default`, donc le type est récupéré directement et un `AssemblyRef` pointant vers b est ajouté aux métadonnées de a. **a n'a pas du tout besoin de savoir que b existe.**
+
+**Exigence stricte** : lors du référencement du mod injecté dans le csproj, vous devez écrire `Private="false"`. Par défaut, il copie `a.dll` dans le répertoire de sortie, qui est ensuite embarqué dans `b.dll` par `EmbedDependencies` en tant que dépendance embarquée, et à l'exécution `ModLibs` résolvant `a` récupère la seconde copie, ce qui fait échouer les vérifications d'identité de type entre les deux.
+
+**Cas de vérification** : deux projets de modèle `NetCraft.Test1` (a) et `NetCraft.Test2` (b) ; a fournit `Test1Api.Greet` et l'appelle dans son propre `ModEntry.Server`, tandis que b remplace ce site d'appel par `Test2Probe.OnGreet` et appelle aussi `Greet` une fois dans le `ModEntry.Server` de b comme contrôle. Journal d'exécution réel :
 
 ```
 Mod netcraft.test2 injects NetCraft.Test1!NetCraft.Test1.Test1Api::Greet replaced by NetCraft.Test2.Test2Probe::OnGreet [CallSite/ILRewrite]
 Mod scan finished: 2 found, injection targets NetCraft.Server,NetCraft.Game,NetCraft.Storage,NetCraft.Test1 runtime
-Test1 internal greeting: Test2-rewritten greeting self    ← injection took effect
-Test2 internal greeting: Test1 original greeting test2    ← control group: the rule only rewrites the target assembly, so b's own internal call site is untouched
+Test1 internal greeting: Test2-rewritten greeting self    ← l'injection a pris effet
+Test2 internal greeting: Test1 original greeting test2    ← groupe de contrôle : la règle ne réécrit que l'assembly cible, donc le site d'appel interne de b n'est pas touché
 ```
 
-Dependencies derive order only from `AssemblyRef` and carry no version constraint. To constrain versions, declare them in the manifest's `depends`, see [4.2](#42-ncmodjson-fields).
+Les dépendances ne déduisent l'ordre que de `AssemblyRef` et ne portent aucune contrainte de version. Pour contraindre les versions, déclarez-les dans les `depends` du manifeste, voir la section [4.2](#42-champs-de-ncmodjson).
 
-### 6.2 Annotation injection
+### 6.2 Injection par annotation
 
-**Scenario**: `[Inject(typeof(X), nameof(X.M))]` on the replacement method, with no rule in `ncmod.json`.
+**Scénario** : `[Inject(typeof(X), nameof(X.M))]` sur la méthode de remplacement, sans aucune règle dans `ncmod.json`.
 
-**Conclusion**: it works and needs no manifest declaration. Annotations and the manifest share one source, are merged at assembly, and the annotation wins for the same injection point.
+**Conclusion** : cela fonctionne et ne nécessite aucune déclaration dans le manifeste. Les annotations et le manifeste partagent une seule source, sont fusionnés à l'assemblage, et l'annotation gagne pour le même point d'injection.
 
-**Why no declaration is needed**: annotations are just the `CustomAttribute` table in metadata, and the loader already reads the same metadata when scanning mods (manifest, embedded resources, and AssemblyRef — three items), so reading one more table introduces no new loading or timing constraint. The only precondition is that the mod references `NetCraft.ModApi` (the annotations' host).
+**Pourquoi aucune déclaration n'est nécessaire** : les annotations ne sont que la table `CustomAttribute` dans les métadonnées, et le loader lit déjà les mêmes métadonnées lors du scan des mods (manifeste, ressources embarquées et AssemblyRef — trois éléments), donc lire une table de plus n'introduit aucune nouvelle contrainte de chargement ou de timing. Le seul prérequis est que le mod référence `NetCraft.ModApi` (l'hôte des annotations).
 
-**The premise is static reading**: reading annotations must go through `MetadataReader` and **must not use `Assembly.Load` + `GetCustomAttributes`** — the latter pulls up the mod assembly just to read rules, and the rewrite window is gone on the spot.
+**Le postulat est la lecture statique** : la lecture des annotations doit passer par `MetadataReader` et **ne doit pas utiliser `Assembly.Load` + `GetCustomAttributes`** — ce dernier remonte l'assembly du mod juste pour lire les règles, et la fenêtre de réécriture est perdue sur-le-champ.
 
-**`typeof` does not constitute a type reference**: what `typeof(X)` compiles into the parameter is the type's serialized name (`full name, assembly, Version=…`), which resolves to just a string and does not require `X` to be present. So writing `typeof(injected-mod)` in an annotation does **not** violate the constraint in 2.2 that "a replacement class must not reference the injected mod's types" — a name appearing in metadata and resolving a type at runtime are two different things.
+**`typeof` ne constitue pas une référence de type** : ce que `typeof(X)` compile dans le paramètre est le nom sérialisé du type (`nom complet, assembly, Version=…`), qui se résout en une simple chaîne et n'exige pas que `X` soit présent. Donc écrire `typeof(mod-injecté)` dans une annotation **ne viole pas** la contrainte de la section 2.2 selon laquelle « une classe de remplacement ne doit pas référencer les types du mod injecté » — un nom apparaissant dans les métadonnées et la résolution d'un type à l'exécution sont deux choses différentes.
 
-**Verification case**: `NetCraft.Test2` against two methods of `NetCraft.Test1`; `Greet` goes through the annotation and `Farewell` through the manifest. Both rules are installed and both call sites are replaced:
+**Cas de vérification** : `NetCraft.Test2` contre deux méthodes de `NetCraft.Test1` ; `Greet` passe par l'annotation et `Farewell` par le manifeste. Les deux règles sont installées et les deux sites d'appel sont remplacés :
 
 ```
 Mod netcraft.test2 injects NetCraft.Test1!NetCraft.Test1.Test1Api::Greet replaced by NetCraft.Test2.Test2Probe::OnGreet [CallSite/ILRewrite]        ← annotation
-Mod netcraft.test2 injects NetCraft.Test1!NetCraft.Test1.Test1Api::Farewell replaced by NetCraft.Test2.Test2Probe::OnFarewell [CallSite/ILRewrite]  ← manifest
+Mod netcraft.test2 injects NetCraft.Test1!NetCraft.Test1.Test1Api::Farewell replaced by NetCraft.Test2.Test2Probe::OnFarewell [CallSite/ILRewrite]  ← manifeste
 Test1 internal greeting: Test2-rewritten greeting self
 Test1 internal farewell: Test2-rewritten farewell self
-Test2 internal greeting: Test1 original greeting test2     ← control group: the rule only rewrites the target assembly
-Test2 internal farewell: Test1 original farewell test2     ← control group
+Test2 internal greeting: Test1 original greeting test2     ← groupe de contrôle : la règle ne réécrit que l'assembly cible
+Test2 internal farewell: Test1 original farewell test2     ← groupe de contrôle
 ```
 
-The same case also incidentally verified that the annotation's named parameter (`Environment = "server"`) is resolved too.
+Le même cas a aussi vérifié incidemment que le paramètre nommé de l'annotation (`Environment = "server"`) est résolu lui aussi.
 
-### 6.3 The performance cost of attaching the profiler
+### 6.3 Le coût en performance de l'attachement du profiler
 
-**Scenario**: the same pure-computation program (a hundred million modulo-and-accumulate iterations), run once without the profiler and once with it attached (the three `CORECLR_ENABLE_PROFILING` environment variables). Five runs each.
+**Scénario** : le même programme de pur calcul (cent millions d'itérations modulo-et-accumulation), exécuté une fois sans le profiler et une fois avec lui attaché (les trois variables d'environnement `CORECLR_ENABLE_PROFILING`). Cinq exécutions chacune.
 
-**Conclusion**: no difference in steady state; the cost is entirely at startup.
+**Conclusion** : aucune différence en régime stable ; le coût est entièrement au démarrage.
 
-| | Total process time (5 runs, ms) | In-program computation time |
+| | Temps total du processus (5 exécutions, ms) | Temps de calcul dans le programme |
 | --- | --- | --- |
-| without | 306 / 260 / 278 / 253 / 300 | 225 ms |
-| with | 406 / 370 / 340 / 325 / 354 | 193 ms |
+| sans | 306 / 260 / 278 / 253 / 300 | 225 ms |
+| avec | 406 / 370 / 340 / 325 / 354 | 193 ms |
 
-Total time is about 80–110 ms longer. The source is `COR_PRF_DISABLE_ALL_NGEN_IMAGES` — enabling ReJIT requires disabling ReadyToRun images at the same time, so framework code can only go through JIT; the timed loop inside the program is identical once JIT-compiled, showing no difference (the run with the profiler was actually slightly faster, which is noise).
+Le temps total est environ 80–110 ms plus long. La source est `COR_PRF_DISABLE_ALL_NGEN_IMAGES` — activer ReJIT exige de désactiver en même temps les images ReadyToRun, donc le code du framework ne peut passer que par le JIT ; la boucle chronométrée à l'intérieur du programme est identique une fois compilée par JIT, ne montrant aucune différence (l'exécution avec le profiler était en fait légèrement plus rapide, ce qui est du bruit).
 
-**A waste also fixed along the way**: the initial implementation subscribed to `COR_PRF_MONITOR_JIT_COMPILATION`, a native callback fired after every method compiles, which we never used. After removing it the event mask changed from `0x80040024` to `0x80040004`; the table above is the data after removal.
+**Un gaspillage aussi corrigé au passage** : l'implémentation initiale s'abonnait à `COR_PRF_MONITOR_JIT_COMPILATION`, un callback natif déclenché après la compilation de chaque méthode, que nous n'utilisions jamais. Après l'avoir retiré, le masque d'événements est passé de `0x80040024` à `0x80040004` ; le tableau ci-dessus correspond aux données après retrait.
 
-**Verification case**: `__hookverify/BenchProbe`.
+**Cas de vérification** : `__hookverify/BenchProbe`.
 
-### 6.4 Two mods injecting the same target
+### 6.4 Deux mods injectant la même cible
 
-**Scenario**: two mods each declare a rule that hits the same target method (`MethodBody` form, different replacement methods).
+**Scénario** : deux mods déclarent chacun une règle qui touche la même méthode cible (forme `MethodBody`, méthodes de remplacement différentes).
 
-**Conclusion**: no error, no crash; **the first-assembled rule wins and the later one silently fails**.
+**Conclusion** : aucune erreur, aucun plantage ; **la règle assemblée en premier gagne et la seconde échoue silencieusement**.
 
-Both rules enter the rule table — no cross-mod deduplication is done. When rewriting, the **first** entry in the same-key list for `OriginalType::OriginalMethod` is taken; host scoping behaves the same way, with `InType`/`InMethod` being "the first match wins". Which is first depends on assembly order, and assembly order comes from the enumeration order of the mods directory; **there is no priority field and it cannot be controlled by declaring dependencies** (dependencies affect only the order of `Init()`, not the assembly of injection rules).
+Les deux règles entrent dans la table de règles — aucune déduplication inter-mods n'est effectuée. Au moment de la réécriture, la **première** entrée de la liste de même clé pour `OriginalType::OriginalMethod` est prise ; la portée d'hôte se comporte de la même façon, `InType`/`InMethod` étant « la première correspondance l'emporte ». Laquelle est première dépend de l'ordre d'assemblage, et l'ordre d'assemblage vient de l'ordre d'énumération du répertoire des mods ; **il n'y a pas de champ de priorité et cela ne peut pas être contrôlé en déclarant des dépendances** (les dépendances n'affectent que l'ordre de `Init()`, pas l'assemblage des règles d'injection).
 
-**Runtime injection is first-come, first-served too**: a later registration request is sent normally, but `GetReJITParameters` claims by "module + method" and always matches the first request, so the later registration does not land. Measured after a second injection, the target method's behavior stays at the first result.
+**L'injection à l'exécution est aussi premier arrivé, premier servi** : une requête d'enregistrement ultérieure est envoyée normalement, mais `GetReJITParameters` revendique par « module + méthode » et correspond toujours à la première requête, donc l'enregistrement ultérieur ne s'applique pas. Mesuré après une seconde injection, le comportement de la méthode cible reste au premier résultat.
 
-**One bad rule does not affect the others**: problems like the target type not being in any known assembly or a misspelled injection form are recorded in `ModHooks.Errors` at assembly time and that entry is skipped, while other mods' rules are assembled as usual.
+**Une règle défectueuse n'affecte pas les autres** : des problèmes comme le type cible absent de toute assembly connue ou une forme d'injection mal orthographiée sont consignés dans `ModHooks.Errors` au moment de l'assemblage et cette entrée est ignorée, tandis que les règles des autres mods sont assemblées normalement.
 
-**Conflicts are recorded**: when assembly detects the same injection point declared by multiple mods, the later-assembled one is written to `ModHooks.Warnings` and output in the startup log as `Mod injection conflict ...`, naming which two mods collided and which one will not take effect. It is a warning, not an error, does not affect loading, and the rule itself remains in the table (just unreachable).
+**Les conflits sont consignés** : quand l'assemblage détecte le même point d'injection déclaré par plusieurs mods, celui assemblé en dernier est écrit dans `ModHooks.Warnings` et affiché dans le journal de démarrage sous la forme `Mod injection conflict ...`, nommant quels deux mods sont entrés en collision et lequel ne prendra pas effet. C'est un avertissement, pas une erreur, cela n'affecte pas le chargement, et la règle elle-même reste dans la table (simplement inatteignable).
 
-**Runtime injection goes through this check too**: the conflict detection key includes `patchMode`, so one mod writing `ILRewrite` and another writing `RuntimeInject` does not count as a collision (two independent paths, each doing its own thing); only two of the same mode are judged conflicting and warned. Its actual landing is likewise first-come, first-served — `GetReJITParameters` claims by "module + method", matching the first request, so later ones are sent but do not land.
+**L'injection à l'exécution passe aussi par cette vérification** : la clé de détection de conflit inclut `patchMode`, donc un mod écrivant `ILRewrite` et un autre écrivant `RuntimeInject` ne compte pas comme une collision (deux chemins indépendants, chacun faisant son propre travail) ; seuls deux du même mode sont jugés en conflit et avertis. Son application effective est de même premier arrivé, premier servi — `GetReJITParameters` revendique par « module + méthode », correspondant à la première requête, donc les suivantes sont envoyées mais ne s'appliquent pas.
 
-**The one hard crash point**: when two mods both patch the same method in `RuntimePatch` mode, the second hits `RuntimeHookEngine`'s duplicate-registration check and throws `InvalidOperationException`, and this path is not caught, so startup fails outright. `RuntimePatch` is on its way out (see [2.6](#26-runtime-injection-modifying-already-running-code)); do not use it in new rules.
+**Le seul point de plantage dur** : quand deux mods patchent tous deux la même méthode en mode `RuntimePatch`, le second atteint la vérification de double enregistrement de `RuntimeHookEngine` et lève `InvalidOperationException`, et ce chemin n'est pas intercepté, donc le démarrage échoue complètement. `RuntimePatch` est en voie de disparition (voir la section [2.6](#26-injection-à-lexécution--modifier-du-code-déjà-en-cours-dexécution)) ; ne l'utilisez pas dans de nouvelles règles.
 
-**Verification case**: the `modinjection` module of `NetCraft.Test`, entries `same anchor first mod wins quietly` and `one bad rule does not sink the rest`.
+**Cas de vérification** : le module `modinjection` de `NetCraft.Test`, entrées `same anchor first mod wins quietly` et `one bad rule does not sink the rest`.
 
-### 6.5 Not yet verified
+### 6.5 Pas encore vérifié
 
-- **Runtime injection working on a real server**: `RuntimeInject` mode has been verified end-to-end in `__hookverify/RuntimeProbe` (after registration the target method's behavior is swapped to the replacement's), and the mod assembly side also has test coverage for routing and downgrade; but no build step currently places `lead_hook_native` into NC's run directory, so running this chain on a real server requires first putting the library in the program root (or pointing to it with `NC_PROFILER_PATH`). This step is not done.
-- **A replacement class referencing the injected mod's types**: by reasoning, at the moment of rewriting a it would resolve a, while a is stuck just before load completion (it is not yet in `Default`, and neither `ModLibs` nor the kernel resolution callback recognizes mod assemblies), so `PrepareMod` is expected to throw and record into `result.Errors`. Not yet actually run. Note 6.2 only proves that **`typeof` in an annotation** is not a reference; **the type appearing in a method signature** is another matter.
+- **L'injection à l'exécution fonctionnant sur un vrai serveur** : le mode `RuntimeInject` a été vérifié de bout en bout dans `__hookverify/RuntimeProbe` (après enregistrement, le comportement de la méthode cible est remplacé par celui de la méthode de remplacement), et le côté assembly du mod a aussi une couverture de test pour le routage et la dégradation ; mais aucune étape de build ne place actuellement `lead_hook_native` dans le répertoire d'exécution de NC, donc exécuter cette chaîne sur un vrai serveur exige de placer d'abord la bibliothèque à la racine du programme (ou de la pointer avec `NC_PROFILER_PATH`). Cette étape n'est pas faite.
+- **Une classe de remplacement référençant les types du mod injecté** : par raisonnement, au moment de réécrire a, elle résoudrait a, tandis que a est bloqué juste avant la fin du chargement (il n'est pas encore dans `Default`, et ni `ModLibs` ni le callback de résolution du noyau ne reconnaît les assemblies de mods), donc `PrepareMod` devrait lever une exception et consigner dans `result.Errors`. Pas encore réellement exécuté. Notez que la section 6.2 ne prouve que le fait que **`typeof` dans une annotation** n'est pas une référence ; **le type apparaissant dans une signature de méthode** est une autre affaire.
 
 ---
 
-## Appendix: HookType overview
+## Annexe : aperçu des HookType
 
-| Form | Effect | Requirement on the replacement method signature |
+| Forme | Effet | Exigence sur la signature de la méthode de remplacement |
 | --- | --- | --- |
-| `CallSite` | replace call sites to the target method with your method | parameter count matches the called method (instance call +1) |
-| `MethodBody` | replace the entire target method body | matches the replaced method |
-| `NewObj` | replace `new X(...)` | parameter count matches the constructor |
-| `FieldRead` | instrument field reads | by the read type |
-| `FieldWrite` | instrument field writes | by the write type |
-| `TypeCheck` | instrument `isinst` / `castclass` | by the checked type |
-| `Box` | instrument boxing/unboxing | by the element type |
-| `FunctionPointer` | instrument function pointer loads | by the delegate type |
-| `LocalRead` | instrument local variable reads | zero parameters, returns the variable's value |
-| `LocalWrite` | instrument local variable writes | one parameter, receives the written value |
-| `Constant` | instrument constant loads | zero parameters, returns the constant's value |
-| `Probe` | keep the original method body, instrumenting the entry and every exit; with `LabelArgumentIndex`, one argument can be folded into the label | `Begin()` returns long, `End(string, long)` |
-| `Mark` | report once at method entry only, without timing | `void method(string label)` |
+| `CallSite` | remplacer les sites d'appel de la méthode cible par votre méthode | le nombre de paramètres correspond à la méthode appelée (appel d'instance +1) |
+| `MethodBody` | remplacer tout le corps de la méthode cible | correspond à la méthode remplacée |
+| `NewObj` | remplacer `new X(...)` | le nombre de paramètres correspond au constructeur |
+| `FieldRead` | instrumenter les lectures de champs | selon le type lu |
+| `FieldWrite` | instrumenter les écritures de champs | selon le type écrit |
+| `TypeCheck` | instrumenter `isinst` / `castclass` | selon le type vérifié |
+| `Box` | instrumenter le boxing/unboxing | selon le type d'élément |
+| `FunctionPointer` | instrumenter les chargements de pointeurs de fonction | selon le type de délégué |
+| `LocalRead` | instrumenter les lectures de variables locales | zéro paramètre, renvoie la valeur de la variable |
+| `LocalWrite` | instrumenter les écritures de variables locales | un paramètre, reçoit la valeur écrite |
+| `Constant` | instrumenter les chargements de constantes | zéro paramètre, renvoie la valeur de la constante |
+| `Probe` | garder le corps de méthode d'origine, en instrumentant l'entrée et chaque sortie ; avec `LabelArgumentIndex`, un argument peut être replié dans le label | `Begin()` renvoie long, `End(string, long)` |
+| `Mark` | signaler une fois à l'entrée de la méthode seulement, sans chronométrage | `void method(string label)` |
 
-`Probe` and `Mark` pass only the label text (`Probe` can also include one argument's `ToString()`); they cannot obtain object references. To get actual arguments, use `CallSite`.
+`Probe` et `Mark` ne passent que le texte du label (`Probe` peut aussi inclure le `ToString()` d'un argument) ; ils ne peuvent pas obtenir de références d'objets. Pour obtenir les arguments réels, utilisez `CallSite`.
 
-`InType`/`InMethod`, `Placement`, and `Ordinal` (see [2.4](#24-narrowing-to-one-site-host-scoping-and-placement)) are meaningful only for instruction-level forms: the ten entries in the table above other than `MethodBody`, `Probe`, and `Mark` can choose replace or insert-before/after, and can use `Ordinal` to pick a single occurrence; `MethodBody` always replaces the whole thing, and `Probe`/`Mark` ignore these parameters.
+`InType`/`InMethod`, `Placement` et `Ordinal` (voir la section [2.4](#24-se-restreindre-à-un-seul-site--portée-de-lhôte-et-placement)) n'ont de sens que pour les formes au niveau instruction : les dix entrées du tableau ci-dessus autres que `MethodBody`, `Probe` et `Mark` peuvent choisir remplacer ou insérer avant/après, et peuvent utiliser `Ordinal` pour choisir une seule occurrence ; `MethodBody` remplace toujours l'ensemble, et `Probe`/`Mark` ignorent ces paramètres.
 
-For the three kinds `LocalRead` / `LocalWrite` / `Constant`, the host method is written in `target` rather than a referenced entity, and `localIndex` or `constantValue` is additionally required; see [2.5](#25-in-method-body-anchors-local-variables-and-constants).
+Pour les trois sortes `LocalRead` / `LocalWrite` / `Constant`, la méthode hôte est écrite dans `target` plutôt qu'une entité référencée, et `localIndex` ou `constantValue` est en plus requis ; voir la section [2.5](#25-ancres-dans-le-corps-de-méthode--variables-locales-et-constantes).

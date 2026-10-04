@@ -1,46 +1,46 @@
-# NetCraft mod template
+# Modèle de mod NetCraft
 
-Sample code for NetCraft mod development. Every entry in `NetCraftTemplate.yaml`
-points at one file under `examples/`, and `ncm template` pulls them on demand.
+Exemples de code pour le développement de mods NetCraft. Chaque entrée de `NetCraftTemplate.yaml`
+pointe vers un fichier sous `examples/`, et `ncm template` les récupère à la demande.
 
-## Usage
+## Utilisation
 
 ```
-ncm template view              list every entry
-ncm template view Wrapper.?    filter by id, ? and * are wildcards
-ncm template example <api id>  pull one example file into the current directory
+ncm template view              lister toutes les entrées
+ncm template view Wrapper.?    filtrer par id, ? et * sont des jokers
+ncm template example <api id>  copier un fichier d'exemple dans le répertoire courant
 ```
 
-## The two routes
+## Les deux voies
 
-`NetCraft.ModApi` exposes two namespaces, pick the one that fits:
+`NetCraft.ModApi` expose deux espaces de noms, choisissez celui qui convient :
 
-| Namespace | What you get |
+| Espace de noms | Ce que vous obtenez |
 | --- | --- |
-| `NetCraft.ModApi.Wrapper` | Events, `Nc*` facades and `Nc*` handles. No kernel type shows up in the public surface, so a kernel rename does not force a rebuild of your mod. |
-| `NetCraft.ModApi.Extension` | `[Inject]` and `[Mixin]` attributes. Rules name kernel types and methods directly, which is more powerful and more fragile. |
+| `NetCraft.ModApi.Wrapper` | Événements, façades `Nc*` et handles `Nc*`. Aucun type du noyau n'apparaît dans la surface publique, donc un renommage du noyau ne force pas à recompiler votre mod. |
+| `NetCraft.ModApi.Extension` | Attributs `[Inject]` et `[Mixin]`. Les règles nomment directement les types et méthodes du noyau, ce qui est plus puissant et plus fragile. |
 
-## Common calls
+## Appels courants
 
-Open this panel from inside a mod project and every call below that your code
-actually uses is graded against `NetCraftTemplate.yaml`: green when the member
-is declared, amber when the member is not, red when the type is not declared
-at all. Hover a highlighted name to see the reason.
+Ouvrez ce panneau depuis un projet de mod : chaque appel ci-dessous réellement utilisé
+par votre code est évalué par rapport à `NetCraftTemplate.yaml` : vert lorsque le membre
+est déclaré, orange lorsqu'il ne l'est pas, rouge lorsque le type n'est pas déclaré du tout.
+Survolez un nom surligné pour voir la raison.
 
-| Call | What it does |
+| Appel | Ce qu'il fait |
 | --- | --- |
-| `NcServer.IsAvailable` | whether the server is up and captured |
-| `NcServer.Broadcast` | system message to everyone online |
-| `NcServer.Execute` | run a command as the console |
-| `NcWorld.GetBlock` | read one block, null when the chunk is unloaded |
-| `NcWorld.SetBlock` | write one block, runs the full update chain |
-| `NcWorld.BreakBlock` | break a block the way a player would |
-| `NcPlayer.Name` | the player name |
-| `NcPlayer.Health` | current health |
-| `NcPlayers.Find` | look up an online player by name |
-| `NcPlayers.Send` | private system message |
-| `NcRegistries.FindState` | block state by namespaced id |
-| `NcRegistries.FindItem` | item by namespaced id |
-| `ServerEvents.Tick` | runs every server tick |
-| `ServerEvents.PlayerJoin` | a player finished joining |
-| `ServerEvents.BlockBroken` | a block was actually replaced |
+| `NcServer.IsAvailable` | si le serveur est démarré et capturé |
+| `NcServer.Broadcast` | message système à tous les joueurs en ligne |
+| `NcServer.Execute` | exécuter une commande en tant que console |
+| `NcWorld.GetBlock` | lire un bloc, null lorsque le chunk n'est pas chargé |
+| `NcWorld.SetBlock` | écrire un bloc, exécute toute la chaîne de mise à jour |
+| `NcWorld.BreakBlock` | casser un bloc comme le ferait un joueur |
+| `NcPlayer.Name` | le nom du joueur |
+| `NcPlayer.Health` | santé actuelle |
+| `NcPlayers.Find` | rechercher un joueur en ligne par son nom |
+| `NcPlayers.Send` | message système privé |
+| `NcRegistries.FindState` | état de bloc par id namespacé |
+| `NcRegistries.FindItem` | objet par id namespacé |
+| `ServerEvents.Tick` | s'exécute à chaque tick du serveur |
+| `ServerEvents.PlayerJoin` | un joueur a terminé de se connecter |
+| `ServerEvents.BlockBroken` | un bloc a été réellement remplacé |

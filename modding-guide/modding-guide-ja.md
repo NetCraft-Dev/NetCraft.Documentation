@@ -1,105 +1,105 @@
-# NetCraft Modding Guide
+# NetCraft 改造ガイド
 
 
-Details for individual APIs are not here; see [mod-api.md](mod-api.md).
+個々のAPIの詳細はここにはない。[modapi-ja.md](modapi-ja.md) を参照。
 
 ---
 
-## 1. Runtime structure first
+## 1. まずは実行時の構造
 
-### 1.1 Three process entry points
+### 1.1 3つのプロセスエントリポイント
 
-NC has three entry points, and the mod injection pipeline is the same for all three:
+NCには3つのエントリポイントがあり、Mod注入パイプラインは3つとも同じである:
 
-| Entry | Purpose |
+| エントリ | 用途 |
 | --- | --- |
-| `NetCraft.Loader` | one exe for both sides: `--server` starts the server; `--client` or no mode flag starts the client |
-| `NetCraft.Server.Exe` | standalone server executable |
-| `NetCraft.Client.Exe` | standalone client executable |
+| `NetCraft.Loader` | 両サイド兼用の1つのexe。`--server` でサーバを起動し、`--client` かモードフラグなしでクライアントを起動する |
+| `NetCraft.Server.Exe` | 単体のサーバ実行ファイル |
+| `NetCraft.Client.Exe` | 単体のクライアント実行ファイル |
 
-`Main` itself is a thin shell that only registers callbacks and hands the work to the next method. Take `NetCraft.Server.Exe`:
+`Main` 自体は薄い殻で、コールバックを登録し、次のメソッドに処理を渡すだけである。`NetCraft.Server.Exe` を例に取ると:
 
 ```csharp
 public static int Main(string[] args)
 {
-    EmbeddedAssemblyLoader.Initialize();   // register the kernel assembly resolution callback
-    BootMods(args);                        // run the mod bootstrap
-    return Launch(args);                   // only now enter the business implementation
+    EmbeddedAssemblyLoader.Initialize();   // カーネルアセンブリ解決コールバックを登録する
+    BootMods(args);                        // Modのブートストラップを実行する
+    return Launch(args);                   // ここで初めて業務実装に入る
 }
 ```
 
-This separation is not a matter of style. When the JIT compiles a method it resolves **all types** appearing in that method body, and this happens before the method executes. If `Main` called `ServerMain.Run(args)` directly, `NetCraft.Server.dll` would be pulled up the instant `Main` is JIT-compiled, before the mod bootstrap has run, and the rewrite window would be gone. So both `BootMods` and `Launch` must be marked `MethodImplOptions.NoInlining` — without the marker the JIT inlines them back into `Main`, defeating the split.
+この分離はスタイルの問題ではない。JITがメソッドをコンパイルするとき、そのメソッド本体に現れる**すべての型**を解決し、これはメソッドの実行前に起こる。もし `Main` が `ServerMain.Run(args)` を直接呼んでいたら、`NetCraft.Server.dll` は `Main` がJITコンパイルされた瞬間、Modブートストラップが走る前に引き上げられ、書き換えウィンドウは失われていた。そのため `BootMods` と `Launch` の両方に `MethodImplOptions.NoInlining` を付けなければならない — これがないとJITがそれらを `Main` にインライン展開してしまい、分割が無意味になる。
 
-`NetCraft.Loader` has the same structure, except its mode detection and mod bootstrap are both in `Launch`, and `Main` keeps only the two steps `Initialize` and `Launch`.
+`NetCraft.Loader` も同じ構造だが、モード判定とModブートストラップがどちらも `Launch` にあり、`Main` は `Initialize` と `Launch` の2ステップのみを保つ。
 
-### 1.2 Kernel assemblies in the kernel/ subdirectory
+### 1.2 kernel/ サブディレクトリにあるカーネルアセンブリ
 
-The output directory after a build looks like this:
+ビルド後の出力ディレクトリは次のようになる:
 
 ```
 NetCraft.Server.Exe.exe
-NetCraft.dll              <- main library, embeds all lower-level sub-libraries
-NetCraft.ModLoader.dll    <- the loader itself
-NetCraft.Server.Exe.dll   <- entry assembly
+NetCraft.dll              <- メインライブラリ。下位のサブライブラリをすべて埋め込む
+NetCraft.ModLoader.dll    <- ローダー自身
+NetCraft.Server.Exe.dll   <- エントリアセンブリ
 kernel/
   NetCraft.Game.dll
   NetCraft.Server.dll
-  ... remaining kernel assemblies
+  ... 残りのカーネルアセンブリ
 mods/
   your-mod.dll
 ```
 
-Why move them into `kernel/` instead of leaving them in the root?
+なぜルートに置かず `kernel/` に移すのか？
 
-The .NET host treats assemblies registered in `deps.json` as TPA (Trusted Platform Assemblies). For assemblies in the TPA, the runtime resolves **by path** — bytes passed to `AssemblyLoadContext.LoadFromStream` are simply ignored. That is, even if we feed in rewritten bytes ahead of time, the runtime still reads the unrewritten copy from disk. Only by removing the kernel assemblies from `deps.json` and moving the files away does the runtime call back into `AssemblyLoadContext.Resolving` on resolution failure, giving us the chance to hand over the rewritten bytes.
+.NETホストは `deps.json` に登録されたアセンブリをTPA（Trusted Platform Assemblies）として扱う。TPA内のアセンブリについて、ランタイムは**パスで**解決する — `AssemblyLoadContext.LoadFromStream` に渡されたバイト列は単に無視される。つまり、事前に書き換えたバイト列を渡しても、ランタイムはディスクから未書き換えのコピーを読んでしまう。カーネルアセンブリを `deps.json` から外し、ファイルを他所へ移して初めて、ランタイムは解決失敗時に `AssemblyLoadContext.Resolving` へコールバックし、書き換え済みのバイト列を渡す機会が得られる。
 
-The three kinds left in the root cannot be moved: the main library (it is the embedding host and must start first), the loader itself (the bootstrap code lives in it), and the entry assembly (the apphost starts from it).
+ルートに残る3種は移せない: メインライブラリ（埋め込みホストであり最初に起動する必要がある）、ローダー自身（ブートストラップコードがその中にある）、エントリアセンブリ（apphostがそこから起動する）。
 
-**Cost**: the entry assembly itself cannot be injected into. If your hook target happens to live in the `NetCraft.Server.Exe.dll` assembly, it is ineffective. Kernel business code is all under `kernel/`, so normally this is not a problem.
+**コスト**: エントリアセンブリ自体には注入できない。フック対象がたまたま `NetCraft.Server.Exe.dll` アセンブリにある場合、それは効かない。カーネルの業務コードはすべて `kernel/` の下にあるため、通常これは問題にならない。
 
-### 1.3 Mod loading sequence
+### 1.3 Modの読み込み順序
 
 ```
 EmbeddedAssemblyLoader.Initialize()
-  └─ install the Resolving callback
+  └─ Resolving コールバックをインストールする
 BootMods → ModBootstrap.Run(current side)
-  ├─ statically scan mods/*.dll (MetadataReader reads embedded ncmod.json, no assembly is loaded)
-  ├─ filter out mods whose environment does not match the current side
-  ├─ assemble injection rules and hand the rewriter to the main library
-  ├─ preload target assemblies: read bytes → run through rewriter → LoadFromStream
-  └─ call each mod entry's Init()
+  ├─ mods/*.dll を静的にスキャンする（MetadataReader が埋め込み ncmod.json を読み、アセンブリはロードしない）
+  ├─ environment が現在のサイドと一致しないModを除外する
+  ├─ 注入ルールを組み立て、リライタをメインライブラリに渡す
+  ├─ 対象アセンブリをプリロードする: バイト列を読む → リライタを通す → LoadFromStream
+  └─ 各Modエントリの Init() を呼ぶ
 Launch → ServerMain/ClientMain.Run(args)
-  └─ kernel business starts running; the probes are already inside
+  └─ カーネルの業務が動き始める。プローブはすでに内側にある
 ```
 
-Note the order: **declarations are scanned, rewritten bytes are loaded, and entry code runs last**. By the time a mod's `Init()` executes, the kernel assemblies have already been replaced.
+順序に注意: **宣言がスキャンされ、書き換え済みのバイト列がロードされ、エントリコードが最後に走る**。Modの `Init()` が実行される時点で、カーネルアセンブリはすでに置き換えられている。
 
 ---
 
-## 2. Key differences from Fabric
+## 2. Fabricとの主な違い
 
-| Dimension | Fabric | NetCraft |
+| 観点 | Fabric | NetCraft |
 | --- | --- | --- |
-| Language / runtime | Java / JVM | C# / .NET 10 (CoreCLR) |
-| Mod carrier | jar containing `fabric.mod.json` | dll embedding `ncmod.json` |
-| Declaration reading | read a file inside the jar | `MetadataReader` statically reads embedded resources without loading assemblies |
-| Code injection | Mixin (annotations in source; members are mixed into the target class at class load) | `Lead.Hook` (rules declared in a manifest or annotations; bytes are rewritten in place during assembly resolution) |
-| Injection granularity | any line in a method body, including locals and intermediate expression values | thirteen forms (call site, field read/write, constructor, type check, boxing, local variable, constant, whole-method-body replacement, probes, etc.), with insert-before or insert-after |
-| Loading model | Fabric Loader + Knot class loader | single default ALC + `AssemblyLoadContext.Resolving` |
-| Official API scope | Fabric API has a great many modules | NetCraft-ModApi currently has only event and command extension points |
+| 言語 / ランタイム | Java / JVM | C# / .NET 10 (CoreCLR) |
+| Modの入れ物 | `fabric.mod.json` を含む jar | `ncmod.json` を埋め込んだ dll |
+| 宣言の読み取り | jar内のファイルを読む | `MetadataReader` がアセンブリをロードせずに埋め込みリソースを静的に読む |
+| コード注入 | Mixin（ソース内のアノテーション。クラスロード時にメンバーが対象クラスに混ぜ込まれる） | `Lead.Hook`（マニフェストかアノテーションでルールを宣言。アセンブリ解決時にバイト列がその場で書き換えられる） |
+| 注入の粒度 | メソッド本体内の任意の行（ローカルや中間の式の値を含む） | 13の形式（呼び出し箇所、フィールド読み書き、コンストラクタ、型チェック、ボックス化、ローカル変数、定数、メソッド本体全体の置換、プローブなど）で、前に挿入または後に挿入が可能 |
+| ロードモデル | Fabric Loader + Knot クラスローダ | 単一のデフォルトALC + `AssemblyLoadContext.Resolving` |
+| 公式APIの範囲 | Fabric API は非常に多くのモジュールを持つ | NetCraft-ModApi は現在、イベントとコマンドの拡張ポイントしかない |
 
-### 2.1 Injection styles: annotations or manifest, pick one
+### 2.1 注入スタイル：アノテーションかマニフェストか、どちらかを選ぶ
 
-Fabric's Mixin is annotated **in source**:
+FabricのMixinは**ソース内**にアノテーションを書く:
 
 ```java
 @Inject(method = "tick", at = @At("HEAD"))
 private void onTick(CallbackInfo ci) { ... }
 ```
 
-NC supports both styles, but their prerequisites differ: the annotation form relies on `InjectAttribute` in `NetCraft.ModApi.Extension`, so a mod that does not reference it cannot use annotations; the manifest form is pure data written in `ncmod.json` and requires no reference for injection rules.
+NCは両スタイルをサポートするが、前提条件が異なる: アノテーション形式は `NetCraft.ModApi.Extension` の `InjectAttribute` に依存するため、これを参照しないModはアノテーションを使えない。マニフェスト形式は `ncmod.json` に書く純粋なデータで、注入ルールに参照は不要である。
 
-**Annotation**, placed on your own replacement method:
+**アノテーション**は、自分の置換メソッドに付ける:
 
 ```csharp
 [Inject(typeof(DedicatedServer), nameof(DedicatedServer.Tick),
@@ -107,7 +107,7 @@ NC supports both styles, but their prerequisites differ: the annotation form rel
 public static void OnTick(object self) { ... }
 ```
 
-**Manifest**, written in `hooks` in `ncmod.json`:
+**マニフェスト**は、`ncmod.json` の `hooks` に書く:
 
 ```json
 {
@@ -121,41 +121,41 @@ public static void OnTick(object self) { ... }
 }
 ```
 
-During assembly the two routes merge into one rule table, and **if the same injection point is written in both, the annotation wins**. After merging they are indistinguishable; the difference is in prerequisites and ergonomics:
+アセンブリ時、2つのルートは1つのルールテーブルに統合され、**同じ注入ポイントを両方に書いた場合はアノテーションが優先される**。統合後は両者を区別できない。違いは前提条件と使い勝手にある:
 
-| | Annotation | Manifest |
+| | アノテーション | マニフェスト |
 | --- | --- | --- |
-| Where it is written | on the replacement method | in `hooks` in `ncmod.json` |
-| Prerequisite | must reference `NetCraft.ModApi` | none, pure data |
-| Type names | `typeof` / `nameof`, checked by the compiler | hand-written strings; typos are only found during assembly |
-| What it can carry | injection rules only | mod identity (id, entry, environment, display info) and injection rules |
+| 書く場所 | 置換メソッド上 | `ncmod.json` の `hooks` 内 |
+| 前提条件 | `NetCraft.ModApi` を参照する必要がある | なし。純粋なデータ |
+| 型名 | `typeof` / `nameof` でコンパイラがチェックする | 手書きの文字列。タイポはアセンブリ時にしか見つからない |
+| 持てる内容 | 注入ルールのみ | Modの識別情報（id、entry、environment、表示情報）と注入ルール |
 
-So `ncmod.json` must be written whether or not you use annotations; it is the sole source of mod identity. Annotations only make rules less error-prone to write. The manifest has no dependency field; dependency relationships are inferred from assembly references (see 6.1) and need no declaration.
+したがって、アノテーションを使うかどうかに関わらず `ncmod.json` を書かなければならない。これがModの識別情報の唯一の源である。アノテーションはルールを書き間違えにくくするだけである。マニフェストに依存関係フィールドはない。依存関係はアセンブリ参照から推論され（6.1 参照）、宣言は不要である。
 
-Conversely, **a mod that does not reference `NetCraft.ModApi` can only use the manifest** — this affects more than injection rules: events like `ServerEvents` and the `Nc*` facades are also in ModApi (under `NetCraft.ModApi.Wrapper`, see [3.3](#33-a-side-by-side-example)), so a mod that cannot use annotations also cannot use them.
+逆に、**`NetCraft.ModApi` を参照しないModはマニフェストしか使えない** — これは注入ルール以上に影響する: `ServerEvents` のようなイベントや `Nc*` ファサードもModApiの中にあり（`NetCraft.ModApi.Wrapper` の下、[3.3](#33-並べて比較する例) 参照）、アノテーションを使えないModはこれらも使えない。
 
-The differences from Fabric remain:
+Fabricとの違いは次のとおり:
 
-- **How and when changes happen**: Mixin has a transformer **mix members of the mixin class into** the target class at **class load**, so what gets loaded is a synthesized new class and the original no longer exists; NC rewrites the target method's instructions in place **before the assembly enters memory**, so the class is still the same class, only its method body changes. Both rewrite at load time, neither modifies bytecode at compile time — Mixin's annotation processor only generates a refmap (obfuscation mapping) and performs validation at build time, while NC is not obfuscated and has no such layer at all.
-- Mixin can inject at **any position in the middle of a method body**; NC can target a specific call site, field access, construction, local variable read/write, or constant within a specified host method, and can insert before or after it (`InType`/`InMethod` narrow the scope, `Placement` decides insert or replace), but it **cannot reach an arbitrary line number** and cannot change a jump target or an intermediate expression value on the stack.
-- Mixin targets use a string method name plus descriptor; NC uses "full type name + method name", so same-name overloads all match, and precision to a single one requires `InType`/`InMethod`.
+- **変更の仕方とタイミング**: Mixin はトランスフォーマが**クラスロード時**に**mixinクラスのメンバーを**対象クラスに**混ぜ込み**、ロードされるのは合成された新しいクラスで元のものはもう存在しない。NCは**アセンブリがメモリに入る前**に対象メソッドの命令をその場で書き換えるため、クラスは同じクラスのままでメソッド本体だけが変わる。どちらもロード時に書き換え、どちらもコンパイル時にバイトコードを変更しない — Mixinのアノテーションプロセッサはrefmap（難読化マッピング）を生成してビルド時に検証を行うだけであり、NCは難読化されておらず、その層自体が存在しない。
+- Mixinは**メソッド本体の途中の任意の位置**に注入できる。NCは指定したホストメソッド内の特定の呼び出し箇所、フィールドアクセス、構築、ローカル変数の読み書き、定数を対象にでき、その前後に挿入できる（`InType`/`InMethod` がスコープを絞り、`Placement` が挿入か置換を決める）が、**任意の行番号には到達できず**、ジャンプ先やスタック上の中間式の値は変更できない。
+- Mixinの対象はメソッド名の文字列とディスクリプタを使う。NCは「完全な型名 + メソッド名」を使うため、同名のオーバーロードはすべてマッチし、1つに絞るには `InType`/`InMethod` が必要である。
 
-**Which layer handles annotations**: the annotation type (`InjectAttribute`) is provided by `NetCraft.ModApi.Extension`, and it is resolved by `NetCraft.ModLoader` — when scanning mods it statically reads the `CustomAttribute` table with `MetadataReader`, without loading assemblies. **`Lead.Hook` does not recognize annotations**; it only sees the merged rule table, and the native injection layer recognizes only the description bytes compiled on the managed side, not even reading `ncmod.json`.
+**どの層がアノテーションを扱うか**: アノテーション型（`InjectAttribute`）は `NetCraft.ModApi.Extension` が提供し、それを解決するのは `NetCraft.ModLoader` である — Modのスキャン時に `MetadataReader` で `CustomAttribute` テーブルを静的に読み、アセンブリはロードしない。**`Lead.Hook` はアノテーションを認識しない**。見るのは統合後のルールテーブルだけであり、ネイティブの注入層はマネージド側でコンパイルされた記述バイト列しか認識せず、`ncmod.json` すら読まない。
 
-This determines what annotations can express: what you can write depends entirely on which fields `InjectAttribute` has. Currently there are seven — target type, method name, `HookType`, `Label`, `Environment`, `PatchMode`, `Ordinal` — and `InType`/`InMethod`/`Placement` from [2.4](#24-narrowing-to-one-site-host-scoping-and-placement) and `LocalIndex`/`ConstantValue` from [2.5](#25-in-method-body-anchors-local-variables-and-constants) **cannot be written in annotations**; use the C# API or wait for the manifest to catch up. The manifest side is missing these too — the only thing it accepts beyond annotations is `ordinal`.
+これはアノテーションで表現できるものを決める: 何を書けるかは `InjectAttribute` がどのフィールドを持つかに完全に依存する。現在7つある — 対象型、メソッド名、`HookType`、`Label`、`Environment`、`PatchMode`、`Ordinal` — そして [2.4](#24-1箇所への絞り込みホストのスコープと配置) の `InType`/`InMethod`/`Placement` と [2.5](#25-メソッド本体内のアンカーローカル変数と定数) の `LocalIndex`/`ConstantValue` は**アノテーションには書けない**。C# APIを使うか、マニフェストが追いつくのを待つこと。マニフェスト側もこれらが欠けており、アノテーションより多く受け付けるのは `ordinal` だけである。
 
-For the thirteen injection forms see the [modding-guide appendix](#appendix-hooktype-overview) and [mod-api.md](mod-api.md).
+13の注入形式については、[改造ガイドの付録](#付録hooktype-の概要) と [modapi-ja.md](modapi-ja.md) を参照。
 
-### 2.2 An important constraint: probe classes must not carry kernel types in signatures
+### 2.2 重要な制約：プローブクラスはシグネチャにカーネル型を含めてはならない
 
-NC rewriting happens **before** the kernel assemblies are loaded. When assembling rules, `Lead.Hook` uses reflection to find your replacement method and build a method reference, and this process resolves every parameter type and return type in the signature.
+NCの書き換えはカーネルアセンブリがロードされる**前に**起こる。ルールを組み立てるとき、`Lead.Hook` はリフレクションを使って置換メソッドを見つけメソッド参照を構築し、この過程でシグネチャ内のすべてのパラメータ型と戻り値型を解決する。
 
-Therefore: **a replacement method's signature may only use BCL types and `object`**. Once a `NetCraft.*` type appears in the signature, resolving it pulls up the kernel assemblies early and injection fails outright.
+したがって: **置換メソッドのシグネチャにはBCL型と `object` しか使えない**。シグネチャに `NetCraft.*` 型が現れると、その解決がカーネルアセンブリを早期に引き上げ、注入は即座に失敗する。
 
-When you need a kernel object, declare the parameter as `object` and cast inside the method body:
+カーネルのオブジェクトが必要なときは、パラメータを `object` として宣言し、メソッド本体内でキャストする:
 
 ```csharp
-//assembly only sees object; the method body is JIT-compiled after the kernel starts
+//アセンブリは object しか見ない。メソッド本体はカーネル起動後にJITコンパイルされる
 public static void OnCommandsReady(object dispatcher)
 {
     var typed = (CommandDispatcher<CommandSourceStack>)dispatcher;
@@ -163,119 +163,119 @@ public static void OnCommandsReady(object dispatcher)
 }
 ```
 
-### 2.3 CallSite is replacement, not insertion
+### 2.3 CallSite は挿入ではなく置換
 
-A `CallSite` rule's replacement method **replaces** the original call, so the original method is not executed. To preserve the original behavior you must restore it yourself in the replacement method:
+`CallSite` ルールの置換メソッドは元の呼び出しを**置換する**ため、元のメソッドは実行されない。元の挙動を保つには、置換メソッド内で自分で復元しなければならない:
 
 ```csharp
 public static void OnCommandsReady(object dispatcher)
 {
     var typed = (CommandDispatcher<CommandSourceStack>)dispatcher;
-    EffectCommand.Register(typed);              // restore the replaced call
-    ServerEvents.CommandRegister.Publish(...);  // then add the mod's own logic
+    EffectCommand.Register(typed);              //置換した呼び出しを復元する
+    ServerEvents.CommandRegister.Publish(...);  //その後でMod自身のロジックを追加する
 }
 ```
 
-Miss this step and the original functionality disappears entirely.
+このステップを怠ると、元の機能は完全に消える。
 
-A few details about carrying this out:
+これを実施する上での細かい点:
 
-- **`this` on an instance method counts as a parameter too**. Whether the target method is an instance method determines whether the replacement method needs an extra leading parameter. In IL both `call` and `callvirt` count as instance calls — for a non-virtual method on a `sealed` type the compiler emits `call`.
-- **One rule key covers all overloads under that class name**; overloads with the same parameter count share one replacement method. `Disconnect(string)` and `Disconnect(Component)` share this way, and the replacement method dispatches by the real argument type.
-- **A private method cannot be called from outside**, so the replacement method cannot restore the original call. Either give up this hook point or call it once via reflection (acceptable at low frequency).
-- **Value-type parameters and return values cannot be declared as `object`**, `object` is a reference on the stack while `float`/`bool` are values, and a mismatch is invalid IL. Keep these two positions as their real types.
-- **Unicast callbacks cannot be assigned directly**. Some kernel callback properties (e.g., the three chunk callbacks on `ServerChunkCache`) are `Action<T>` rather than `event`, and the kernel already occupies them. A mod assigning directly overrides the kernel's copy with no error at all. The correct approach is to hook the property's setter and, at the moment of assignment, chain your logic and the kernel callback into one wrapper delegate.
+- **インスタンスメソッドの `this` もパラメータとして数える**。対象メソッドがインスタンスメソッドかどうかが、置換メソッドに先頭の追加パラメータが必要かを決める。ILでは `call` も `callvirt` もインスタンス呼び出しとして数える — `sealed` 型の非仮想メソッドではコンパイラは `call` を出力する。
+- **1つのルールキーはそのクラス名の下のすべてのオーバーロードをカバーする**。同じパラメータ数のオーバーロードは1つの置換メソッドを共有する。`Disconnect(string)` と `Disconnect(Component)` はこのように共有し、置換メソッドは実際の引数型でディスパッチする。
+- **private メソッドは外部から呼べない**ため、置換メソッドは元の呼び出しを復元できない。このフックポイントを諦めるか、リフレクションで1回呼ぶ（低頻度なら許容できる）。
+- **値型のパラメータと戻り値は `object` として宣言できない**。`object` はスタック上の参照だが `float`/`bool` は値であり、不一致は不正な IL になる。これら2つの位置は本来の型のままにする。
+- **ユニキャストのコールバックは直接代入できない**。一部のカーネルコールバックプロパティ（例: `ServerChunkCache` の3つのチャンクコールバック）は `event` ではなく `Action<T>` で、カーネルがすでに占有している。Modが直接代入するとカーネルのコピーを上書きし、エラーは全く出ない。正しい方法は、そのプロパティの setter をフックし、代入の瞬間に自分のロジックとカーネルのコールバックを1つのラッパーデリゲートに連鎖させることである。
 
-### 2.4 Narrowing to one site: host scoping and placement
+### 2.4 1箇所への絞り込み：ホストのスコープと配置
 
-An instruction-level rule's default scope is **the entire assembly** — every place that calls the target method or reads/writes the target field matches. To narrow to one site, use two optional parameters:
+命令レベルのルールのデフォルトスコープは**アセンブリ全体**である — 対象メソッドを呼ぶ、または対象フィールドを読み書きするすべての箇所がマッチする。1箇所に絞るには2つの省略可能なパラメータを使う:
 
-| Parameter | Effect |
+| パラメータ | 効果 |
 | --- | --- |
-| `InType` / `InMethod` | match anchors only inside the specified host method body; both empty means unrestricted |
-| `Placement` | `Replace` replaces the anchor (default); `Before` / `After` keep the anchor and insert one call before or after it |
-| `Ordinal` | when the same anchor matches multiple places in the host method, pick which one, 0-based. Omitted means every place is modified |
+| `InType` / `InMethod` | 指定したホストメソッド本体の内部でのみアンカーを照合する。両方空なら無制限 |
+| `Placement` | `Replace` はアンカーを置換する（デフォルト）。`Before` / `After` はアンカーを保ち、その前後に呼び出しを1つ挿入する |
+| `Ordinal` | 同じアンカーがホストメソッド内の複数箇所にマッチするとき、どれを選ぶか（0始まり）。省略するとすべての箇所が変更される |
 
 ```csharp
-//example: instrument only when LevelChunk reads block state; PalettedContainer::Get elsewhere is untouched
+//例: LevelChunk がブロック状態を読むときのみ計測する。他所の PalettedContainer::Get はそのまま
 new HookRule("NetCraft.Storage.PalettedContainer", "Get", typeof(MyProbe), nameof(MyProbe.OnGet),
     HookType.CallSite, PatchMode.ILRewrite,
     inType: "NetCraft.Storage.LevelChunk", inMethod: "GetBlockState",
     placement: HookPlacement.Before)
 ```
 
-The two modes impose different requirements on the callback signature:
+2つのモードはコールバックシグネチャに異なる要件を課す:
 
-- **Replace mode** aligns with the arguments of the replaced call (including `this` for instance calls); whether the callback restores the original call is up to you.
-- **Insert mode** passes the **host method's parameters** (including `this`), consistent with the `MethodBody` convention. Insertion does not disturb the stack the anchor has already built up; the original call runs as usual, just with one extra callback before or after it.
+- **置換モード**は置換する呼び出しの引数（インスタンス呼び出しでは `this` を含む）に合わせる。コールバックが元の呼び出しを復元するかは自分次第である。
+- **挿入モード**は**ホストメソッドのパラメータ**（`this` を含む）を渡す。`MethodBody` の慣例と一致する。挿入はアンカーがすでに構築したスタックを乱さない。元の呼び出しは通常どおり実行され、その前後にコールバックが1つ増えるだけである。
 
-A few boundaries:
+いくつかの境界:
 
-- `InType` and `InMethod` are independent; you may specify just one. Both empty is equivalent to no scoping.
-- Multiple rules may hook the same anchor, each scoped to a different host; **the first host match wins**.
-- `Placement` only applies to instruction-level forms (`CallSite`, `NewObj`, field read/write, `TypeCheck`, `Box`, `FunctionPointer`, and the three kinds in [2.5](#25-in-method-body-anchors-local-variables-and-constants)); `MethodBody` always replaces the whole thing.
-- `Ordinal` counts the **order of matches**, regardless of whether that site is ultimately modified; if the rule does not occur enough times in the host method, the rule does not land. Same idea as Mixin's `@At(ordinal)`.
-- `InType` / `InMethod` / `Placement` / `LocalIndex` / `ConstantValue` are currently available only on the C# API; neither `ncmod.json` nor `[Inject]` supports them (the manifest accepts `ordinal`), so manifest-based mods cannot use the first few.
+- `InType` と `InMethod` は独立しており、片方だけ指定してもよい。両方空はスコープなしと等価である。
+- 複数のルールが同じアンカーをフックでき、それぞれ別のホストにスコープされる。**最初にホストへマッチしたものが勝つ**。
+- `Placement` は命令レベルの形式にのみ適用される（`CallSite`、`NewObj`、フィールド読み書き、`TypeCheck`、`Box`、`FunctionPointer`、および [2.5](#25-メソッド本体内のアンカーローカル変数と定数) の3種）。`MethodBody` は常に全体を置換する。
+- `Ordinal` は**マッチの順序**を数え、その箇所が最終的に変更されるかは問わない。ルールがホストメソッド内で十分な回数出現しない場合、そのルールは適用されない。Mixinの `@At(ordinal)` と同じ考え方である。
+- `InType` / `InMethod` / `Placement` / `LocalIndex` / `ConstantValue` は現在C# APIでのみ利用可能である。`ncmod.json` も `[Inject]` もこれらをサポートしない（マニフェストは `ordinal` を受け付ける）。そのためマニフェストベースのModは最初のいくつかを使えない。
 
-### 2.5 In-method-body anchors: local variables and constants
+### 2.5 メソッド本体内のアンカー：ローカル変数と定数
 
-The previous kinds anchor to a **referenced entity** (a method, field, or constructor), whereas `LocalRead` / `LocalWrite` / `Constant` anchor to **a position inside the host method body**, corresponding to Mixin's `@ModifyVariable` and `@ModifyConstant`. For these three, `OriginalType` / `OriginalMethod` name the **host method**, not a referenced entity.
+前述の各種は**参照される実体**（メソッド、フィールド、コンストラクタ）にアンカーするのに対し、`LocalRead` / `LocalWrite` / `Constant` は**ホストメソッド本体内部の位置**にアンカーし、Mixinの `@ModifyVariable` と `@ModifyConstant` に対応する。この3つでは、`OriginalType` / `OriginalMethod` は参照される実体ではなく**ホストメソッド**を指す。
 
-| Form | Extra parameter | Selected positions |
+| 形式 | 追加パラメータ | 選択される位置 |
 | --- | --- | --- |
-| `LocalRead` | `LocalIndex` | every read of that slot (0-based) |
-| `LocalWrite` | `LocalIndex` | every write to that slot |
-| `Constant` | `ConstantValue` | every load of that constant, compared by boxed type |
+| `LocalRead` | `LocalIndex` | そのスロットのすべての読み取り（0始まり） |
+| `LocalWrite` | `LocalIndex` | そのスロットへのすべての書き込み |
+| `Constant` | `ConstantValue` | その定数のすべてのロード。ボックス化された型で比較される |
 
 ```csharp
-//example: insert one callback before the write to slot 0 in G
+//例: G のスロット0への書き込み前にコールバックを1つ挿入する
 new HookRule("TargetLib.Host", "G", typeof(MyProbe), nameof(MyProbe.OnWrite),
     HookType.LocalWrite, PatchMode.ILRewrite,
     localIndex: 0, placement: HookPlacement.Before)
 
-//example: replace the constant 5 in G with the return value of OnConst()
+//例: G の定数5を OnConst() の戻り値で置き換える
 new HookRule("TargetLib.Host", "G", typeof(MyProbe), nameof(MyProbe.OnConst),
     HookType.Constant, PatchMode.ILRewrite, constantValue: 5)
 ```
 
-In replace mode the callback signature aligns with the **instruction's stack effect**, not the host parameters:
+置換モードでは、コールバックシグネチャはホストのパラメータではなく**命令のスタック効果**に合わせる:
 
-| Anchor | Stack effect | Replacement method signature |
+| アンカー | スタック効果 | 置換メソッドのシグネチャ |
 | --- | --- | --- |
-| `LocalRead` | pushes one value | zero parameters, returns that value |
-| `LocalWrite` | pops one value | one parameter |
-| `Constant` | pushes one value | zero parameters, returns that value |
+| `LocalRead` | 値を1つプッシュする | パラメータなし、その値を返す |
+| `LocalWrite` | 値を1つポップする | パラメータ1つ |
+| `Constant` | 値を1つプッシュする | パラメータなし、その値を返す |
 
-`ConstantValue` is compared by boxed type, so `5` (int) and `5L` (long) are two different anchors; to match `ldc.i8` you must pass `long`.
+`ConstantValue` はボックス化された型で比較されるため、`5`（int）と `5L`（long）は2つの異なるアンカーである。`ldc.i8` にマッチさせるには `long` を渡す必要がある。
 
-A slot is the compiled local variable index; the same source may change it under a different compiler version, so do not treat it as a stable identifier when porting across versions.
+スロットはコンパイル後のローカル変数インデックスである。同じソースでもコンパイラのバージョンが違えば変わることがあるため、バージョン間の移植では安定した識別子として扱ってはならない。
 
-### 2.6 Runtime injection: modifying already-running code
+### 2.6 実行時注入：すでに実行中のコードを変更する
 
-The injection discussed so far all happens **before assembly load** — bytes are rewritten first, then handed to the runtime. The premise is that the target assembly has not been loaded yet.
+ここまでに述べた注入はすべて**アセンブリのロード前**に起こる — まずバイト列を書き換え、それからランタイムに渡す。前提は対象アセンブリがまだロードされていないことである。
 
-`Lead.Hook` has another route: using the CLR's Profiler interface (ReJIT) to modify code that is **already loaded, or whose methods have already run**. Both share the same `HookRule`, and the parameters from [2.4](#24-narrowing-to-one-site-host-scoping-and-placement) and [2.5](#25-in-method-body-anchors-local-variables-and-constants) remain available:
+`Lead.Hook` にはもう1つのルートがある: CLRのProfilerインターフェース（ReJIT）を使い、**すでにロードされている、またはメソッドがすでに実行された**コードを変更する。どちらも同じ `HookRule` を共有し、[2.4](#24-1箇所への絞り込みホストのスコープと配置) と [2.5](#25-メソッド本体内のアンカーローカル変数と定数) のパラメータは引き続き利用できる:
 
 ```csharp
 var engine = new HookEngine();
 engine.AddRule(new HookRule("TargetLib.Host", "Callee", typeof(Hooks), nameof(Hooks.Double),
     hookType: HookType.CallSite, patchMode: PatchMode.RuntimeInject, inMethod: "A"));
 
-//one call and injection is done; no restart and no file changes
+//1回の呼び出しで注入が完了する。再起動もファイル変更も不要
 RuntimeInjector.Inject(typeof(Host).Assembly, engine);
 ```
 
-| | Load-time rewriting | Runtime injection |
+| | ロード時書き換え | 実行時注入 |
 | --- | --- | --- |
-| Manifest `patchMode` | `ILRewrite` (default) | `RuntimeInject` |
-| Timing | before the assembly enters memory | any time after the process has started |
-| Foundation | Mono.Cecil byte rewriting | CLR Profiler ReJIT |
-| Prerequisite | the target has not been loaded | the target is already in the process |
-| Modify already-JIT-compiled code | not possible | possible |
+| マニフェストの `patchMode` | `ILRewrite`（デフォルト） | `RuntimeInject` |
+| タイミング | アセンブリがメモリに入る前 | プロセス開始後のいつでも |
+| 基盤 | Mono.Cecil によるバイト書き換え | CLR Profiler ReJIT |
+| 前提 | 対象がまだロードされていない | 対象がすでにプロセス内にある |
+| JITコンパイル済みコードの変更 | 不可 | 可能 |
 
-**Why rules are shared**: Cecil still does the rewriting here, but the result is not written to disk; instead it is compiled into a description handed to the native layer, which submits the new method body to the CLR at runtime, with the remaining version management left to the CLR.
+**なぜルールを共有するのか**: ここでも書き換えはCecilが行うが、結果はディスクに書かれない。代わりに記述へとコンパイルされネイティブ層へ渡され、ネイティブ層が実行時に新しいメソッド本体をCLRへ提出し、残りのバージョン管理はCLRに委ねられる。
 
-**How a mod does it**: add a `patchMode` entry to the rule item in `ncmod.json`; the `[Inject]` annotation has a parameter of the same name.
+**Mod側でのやり方**: `ncmod.json` のルール項目に `patchMode` を追加する。`[Inject]` アノテーションにも同名のパラメータがある。
 
 ```json
 { "target": "NetCraft.Game.Server.DedicatedServer", "method": "Tick",
@@ -288,65 +288,65 @@ RuntimeInjector.Inject(typeof(Host).Assembly, engine);
 public static void OnTick(object self) { }
 ```
 
-**What assembly does**: these rules do not go through the load-time rewriting path (`ModHooks.Rewrite` applies only `ILRewrite`); at assembly time a separate runtime target table is recorded. After the kernel assemblies are preloaded and before mods' `Init()`, the loader takes each of their **already loaded** instances and submits the rewritten method bodies to the CLR. If a target is not loaded at that moment it is skipped with a warning, and it will not be loaded early on its behalf — the constraint from [2.2](#22-an-important-constraint-probe-classes-must-not-carry-kernel-types-in-signatures) that "pulling up the kernel early misses the window" is reversed in direction here, with the same conclusion: if it is not present, it cannot be done.
+**アセンブリ側の動作**: これらのルールはロード時書き換えの経路を通らない（`ModHooks.Rewrite` は `ILRewrite` のみを適用する）。アセンブリ時に別の実行時ターゲットテーブルが記録される。カーネルアセンブリのプリロード後、Modの `Init()` の前に、ローダーは対象の**すでにロード済み**のインスタンスをそれぞれ取り、書き換え済みのメソッド本体をCLRへ提出する。その時点で対象がロードされていなければ警告とともにスキップされ、そのために早期ロードされることもない — [2.2](#22-重要な制約プローブクラスはシグネチャにカーネル型を含めてはならない) の「カーネルを早期に引き上げるとウィンドウを逃す」という制約はここでは向きが逆になり、結論は同じである: 存在しなければできない。
 
-**To hook the native injection layer**: the ReJIT switch can only be set via environment variables at process start (`CORECLR_ENABLE_PROFILING` / `CORECLR_PROFILER` / `CORECLR_PROFILER_PATH`); setting them after startup has no effect. When the loader detects `RuntimeInject` rules early during startup and the process is not yet hooked, it **restarts the process with the same command line** carrying these three variables (`NC_PROFILER_ATTACHED=1` guards against repeated restarts when "hooked but not effective"). The native library `lead_hook_native` must be placed in the program root, or pointed elsewhere via `NC_PROFILER_PATH`; if neither is present, the whole batch of rules is downgraded to a single warning and startup is not blocked.
+**ネイティブ注入層へのフック**: ReJITのスイッチはプロセス開始時の環境変数（`CORECLR_ENABLE_PROFILING` / `CORECLR_PROFILER` / `CORECLR_PROFILER_PATH`）でしか設定できない。起動後に設定しても効果はない。起動時にローダーが `RuntimeInject` ルールを早期に検出し、プロセスがまだフックされていない場合、これら3つの変数を伴って**同じコマンドラインでプロセスを再起動する**（`NC_PROFILER_ATTACHED=1` は「フックしたが効かない」ときに再起動が繰り返されるのを防ぐ）。ネイティブライブラリ `lead_hook_native` はプログラムルートに置くか、`NC_PROFILER_PATH` で別の場所を指す必要がある。どちらも存在しない場合、そのバッチのルール全体が警告1つに降格され、起動は妨げられない。
 
-**Do not mix it with load-time rewriting on the same target**: a method body submitted by runtime injection is derived from **original bytes** and does not include changes load-time rewriting made to the same method — if the same method is hit by both rule types, the load-time version is overwritten entirely. Assembly cannot tell whether two rules hit the same method, so it can only make a coarse judgment by target assembly and record a warning.
+**同じ対象でロード時書き換えと混在させないこと**: 実行時注入で提出されるメソッド本体は**元のバイト列**から作られ、同じメソッドに対してロード時書き換えが加えた変更を含まない — 同じメソッドが両方のルール種別に当たると、ロード時のものが完全に上書きされる。アセンブリは2つのルールが同じメソッドに当たるかを判別できないため、対象アセンブリによる粗い判断しかできず、警告を記録する。
 
-**Annotations do not take part in this path directly**: the native injection layer does not recognize `InjectAttribute` or read `ncmod.json` — it recognizes only description bytes. Annotations and the manifest are both **assembly-time** things (see [2.1](#21-injection-styles-annotations-or-manifest-pick-one)), parsed by `NetCraft.ModLoader` into `HookRule` and then handed to `RuntimeInjector`; the mod side does not need to handle them differently.
+**アノテーションはこの経路に直接関与しない**: ネイティブ注入層は `InjectAttribute` を認識せず `ncmod.json` も読まない — 認識するのは記述バイト列だけである。アノテーションとマニフェストはどちらも**アセンブリ時**のもので（[2.1](#21-注入スタイルアノテーションかマニフェストかどちらかを選ぶ) 参照）、`NetCraft.ModLoader` が `HookRule` に解析してから `RuntimeInjector` に渡す。Mod側で異なる扱いをする必要はない。
 
-**Limitations** (narrower than load-time rewriting): methods with exception handling tables are not supported, the local variable table cannot be changed, generic types and methods are not supported, and operands recognize only method references (field references, string constants, and type tokens throw `NotSupportedException`).
+**制限**（ロード時書き換えより狭い）: 例外処理テーブルを持つメソッドは非対応、ローカル変数テーブルは変更不可、ジェネリック型とジェネリックメソッドは非対応、オペランドはメソッド参照のみを認識する（フィールド参照、文字列定数、型トークンは `NotSupportedException` を投げる）。
 
-**Performance**: injection happens only at registration; afterward the method is ordinary JIT code with the same call overhead as without injection. Attaching the profiler has a one-time cost — enabling ReJIT requires disabling ReadyToRun images at the same time, and measured process startup is about 80–110 ms slower; steady-state computation shows no difference. For a server like NC whose startup is already measured in seconds, this is negligible.
+**パフォーマンス**: 注入は登録時にのみ起こる。その後メソッドは通常のJITコードとなり、注入なしと同じ呼び出しオーバーヘッドである。プロファイラのアタッチには一度きりのコストがある — ReJITを有効にすると同時にReadyToRunイメージを無効化する必要があり、実測でプロセス起動が約80〜110ms遅くなる。定常状態の計算には差が見られない。起動がすでに秒単位で測られるNCのようなサーバでは、これは無視できる。
 
-### 2.7 Do two mods modifying the same class conflict like Mixin?
+### 2.7 同じクラスを変更する2つのModはMixinのように競合するか？
 
-First, why things conflict on the Mixin side. Mixin **mixes members into the target class** and applies them at class load: when multiple mixins mix into the same class, cases like injecting at the same place repeatedly or adding same-named members to the same class throw `MixinApplyError`, and the default fail-hard **kills the game outright**; moreover this detection happens at the instant of class load, when the game may already be half-running.
+まず、Mixin側でなぜ競合するのか。Mixinは**メンバーを対象クラスに混ぜ込み**、クラスロード時に適用する: 複数のmixinが同じクラスに混ざる場合、同じ場所への繰り返し注入や同じクラスへの同名メンバーの追加などで `MixinApplyError` が投げられ、デフォルトのfail-hardは**ゲームを問答無用で落とす**。しかもこの検出はクラスロードの瞬間に起こり、そのときゲームはすでに中途半端に動いているかもしれない。
 
-NC's model is different, and the surface where conflicts can happen is much smaller:
+NCのモデルは異なり、競合が起こり得る面ははるかに小さい:
 
 | | Mixin | NetCraft |
 | --- | --- | --- |
-| Landing method | mix members into the target class + rewrite bytecode | rewrite IL instructions only; no type synthesis, no members added |
-| Structural conflicts (same-named members, inheritance conflicts) | yes | none |
-| When rules are validated | at class load | at assembly time, statically reading metadata |
-| Two rules hitting the same place | throws | first come, first served; the latter silently fails |
-| One mod fails | may drag down the whole load | affects only itself |
+| 適用方法 | メンバーを対象クラスに混ぜ込む + バイトコード書き換え | IL命令の書き換えのみ。型合成なし、メンバー追加なし |
+| 構造的競合（同名メンバー、継承の競合） | あり | なし |
+| ルールの検証時期 | クラスロード時 | アセンブリ時にメタデータを静的に読む |
+| 2つのルールが同じ場所に当たる | 例外を投げる | 先着順。後からのは黙って失敗する |
+| 1つのModが失敗した場合 | ロード全体を巻き込むことがある | それ自身にのみ影響する |
 
-**Static validation**: rules are not built by loading assemblies and reflecting over types, but by reading PE metadata tables. So problems like "the target type is not in any known assembly" or "the injection form is misspelled" are recorded and skipped **early at startup**, without waiting for a class to load before exploding.
+**静的検証**: ルールはアセンブリをロードして型をリフレクションするのではなく、PEメタデータテーブルを読んで構築される。そのため「対象型がどの既知のアセンブリにもない」「注入形式の綴りが間違っている」といった問題は、クラスがロードされるまで爆発を待たず、**起動の早い段階**で記録されスキップされる。
 
-**Failure isolation**: when a mod's rules fail to parse, the replacement class fails to load, or the entry `Init()` throws, only **that one mod** is marked as failed (status `Error`, shown as "load failed" on the MODS page) and the other mods load as usual. One wording needs correcting here: NC has **no runtime unloading** — mods are loaded once, and `ModManager` explicitly does not offer dynamic loading/unloading. So-called "auto-unload on failure" is actually **load-time isolation**: a failed mod is not initialized, but it is also not "unloaded".
+**障害の分離**: Modのルールの解析に失敗した場合、置換クラスのロードに失敗した場合、またはエントリの `Init()` が例外を投げた場合、**その1つのModだけ**が失敗としてマークされ（状態 `Error`、MODSページに「ロード失敗」と表示される）、他のModは通常どおりロードされる。ここで1つ表現を訂正する必要がある: NCには**実行時アンロードがない** — Modは一度ロードされ、`ModManager` は動的なロード/アンロードを明示的に提供しない。いわゆる「失敗時の自動アンロード」は実際には**ロード時の分離**である: 失敗したModは初期化されないが、「アンロード」されるわけでもない。
 
-**Dynamic injection**: on the ReJIT route from [2.6](#26-runtime-injection-modifying-already-running-code), the semantics of several mods competing for the same method match the static case — the first registered wins, and later requests are sent but cannot claim it (`GetReJITParameters` claims by "module + method", taking the first).
+**動的注入**: [2.6](#26-実行時注入すでに実行中のコードを変更する) のReJITルートでは、複数のModが同じメソッドを奪い合うときの意味論は静的の場合と同じである — 最初に登録したものが勝ち、後からの要求は送られても確保できない（`GetReJITParameters` は「モジュール + メソッド」で確保し、最初のものを取る）。
 
-We hit a pitfall on this route once, worth recording: in an early implementation, `FindTypeRef`'s **resolution scope parameter was passed as `mdTokenNil`**, whose semantics are "match only TypeRefs with no resolution scope" — our references all hang off `AssemblyRef`, so the one we had built was never found. It manifested as: the first injection succeeded, but on the second injection reference resolution failed, no new method body could be built, the CLR fell back to the original IL, and **the first injection was lost along with it** (the target method reverted to its uninjected behavior). After the fix it no longer reproduced, but the limitation remains: **metadata injection of references must complete within the window right after the target module loads; the later it is, the more likely it fails**.
+このルートで一度落とし穴に遭ったので記録しておく: 初期の実装では、`FindTypeRef` の**解決スコープパラメータに `mdTokenNil` を渡していた**。その意味論は「解決スコープを持たないTypeRefのみにマッチする」であり、我々の参照はすべて `AssemblyRef` にぶら下がっているため、構築したものが決して見つからなかった。現れ方は: 最初の注入は成功したが、2回目の注入で参照解決に失敗し、新しいメソッド本体を構築できず、CLRは元のILにフォールバックし、**最初の注入もそれとともに失われた**（対象メソッドは未注入の挙動に戻った）。修正後は再現しなくなったが、制限は残る: **参照のメタデータ注入は対象モジュールのロード直後のウィンドウ内で完了しなければならず、遅くなるほど失敗しやすい**。
 
-**The cost must be stated clearly**: NC's non-crashing behavior comes at the cost of conflicts being easily missed — Mixin at least interrupts loading, whereas NC lets the later one silently fail. To address this, assembly performs a **same-anchor conflict check**: when the same injection point is declared by multiple mods, the later-assembled one is recorded in `ModHooks.Warnings` and reported as a warning in the startup log (without blocking loading):
+**コストは明示すべきである**: NCがクラッシュしない挙動は、競合を見逃しやすいことと引き換えである — Mixinは少なくともロードを中断するが、NCは後からのが黙って失敗するままにする。これに対処するため、アセンブリは**同一アンカーの競合チェック**を行う: 同じ注入ポイントが複数のModから宣言された場合、後に組み立てられたものを `ModHooks.Warnings` に記録し、起動ログに警告として報告する（ロードは妨げない）:
 
 ```
 Mod injection conflict mod my-mod-b's injection NetCraft.Game.Server.DedicatedServer::Tick[CallSite/ILRewrite] is already taken by mod my-mod-a; this rule will not take effect
 ```
 
-The detection key is "target type + method + injection form + patch mode". **Host scoping is not distinguished** — neither the manifest nor annotations can write `InType`/`InMethod`, so rules coming from mods are naturally whole-assembly in scope, and the same key means a collision. Rules added directly via the C# API bypass this check, since in that case two rules may each hit a different host and are inherently non-conflicting.
+検出キーは「対象型 + メソッド + 注入形式 + パッチモード」である。**ホストのスコープは区別されない** — マニフェストもアノテーションも `InType`/`InMethod` を書けないため、Modから来るルールは自然とアセンブリ全体スコープになり、同じキーは衝突を意味する。C# APIで直接追加されたルールはこのチェックを迂回する。その場合、2つのルールがそれぞれ別のホストに当たり得て、本質的に競合しないからである。
 
-**Runtime injection goes through this check too**: it enters the same assembly entry point, and the patch mode in the detection key keeps it separate from load-time rewriting; when both types land on the same target assembly there is a separate overwrite notice (see [6.4](#64-two-mods-injecting-the-same-target)).
+**実行時注入もこのチェックを通る**: 同じアセンブリのエントリポイントに入り、検出キーのパッチモードがロード時書き換えと区別する。両方の種別が同じ対象アセンブリに落ちる場合は、別途上書きの通知がある（[6.4](#64-2つのmodが同じターゲットに注入する) 参照）。
 
-### 2.8 Mixins: adding members to a target type
+### 2.8 Mixin：ターゲット型にメンバーを追加する
 
-The previous sections all modify instructions in existing code and cannot create anything new. To **add fields, methods, or interfaces** to a target type, use a mixin.
+これまでの節はすべて既存コードの命令を変更するもので、新しいものは作れない。対象型に**フィールド、メソッド、インターフェースを追加する**にはmixinを使う。
 
-The relationship to Mixin's syntax is as follows:
+Mixinの構文との対応は次のとおり:
 
 | Mixin | NC |
 | --- | --- |
-| `@Mixin(X.class)` on the mixin class | `[Mixin(typeof(X))]` on the source class |
-| members of the mixin class are mixed into the target class | fields and methods of the source class are moved into the target type |
-| `@Unique` adds a private field | write an ordinary field in the source class; it is moved over the same way |
-| `@Shadow` references an existing member of the target class | not needed; write `X`'s members directly and then hook them |
+| mixinクラスに `@Mixin(X.class)` | ソースクラスに `[Mixin(typeof(X))]` |
+| mixinクラスのメンバーが対象クラスに混ぜ込まれる | ソースクラスのフィールドとメソッドが対象型へ移動される |
+| `@Unique` がprivateフィールドを追加する | ソースクラスに普通のフィールドを書く。同じように移動される |
+| `@Shadow` が対象クラスの既存メンバーを参照する | 不要。`X` のメンバーを直接書き、その後でフックする |
 | `@Implements` / `implements` | `Interfaces` |
 
-It can also be written in the manifest:
+マニフェストにも書ける:
 
 ```json
 {
@@ -360,79 +360,79 @@ It can also be written in the manifest:
 [Mixin(typeof(SomeEntity), Interfaces = new[] { typeof(ITagged) })]
 public class SomeEntityMixin
 {
-    //after being moved over, this is an instance field on the target type
+    //移動された後、これは対象型のインスタンスフィールドになる
     public int MyCounter = 5;
 
-    //a mixed-in method; it reads/writes the field moved along with it
+    //混ぜ込まれたメソッド。一緒に移動したフィールドを読み書きする
     public int Bump() => MyCounter + 1;
 
-    //the implementation the interface requires; after being moved over the target type implements ITagged
+    //インターフェースが要求する実装。移動された後、対象型は ITagged を実装する
     public string Describe() => $"tagged:{MyCounter}";
 }
 ```
 
-**Move, not copy**. These members are removed from the source class, leaving only an empty shell — just like Mixin's mixin class, **mod code should no longer use that class** (`new SomeEntityMixin()` or calling its methods will fail to find the members).
+**移動でありコピーではない**。これらのメンバーはソースクラスから取り除かれ、空の殻だけが残る — Mixinのmixinクラスと同様、**Modのコードはそのクラスをもう使うべきではない**（`new SomeEntityMixin()` やそのメソッドの呼び出しはメンバーを見つけられず失敗する）。
 
-A few landing rules:
+いくつかの適用ルール:
 
-- **Only applies to load-time rewriting**. The target type must be in a kernel assembly or mod assembly that has not entered memory yet. Runtime injection only submits method bodies and cannot change type layout, so this form cannot exist on it.
-- **Constructor initializers come along**. Values written in the source class's field initializers are merged into every instance constructor of the target type; static field initializers are merged into the static constructor (created if the target has none). The base-class chaining call inside the source class's constructor is stripped, so the base constructor is not run twice.
-- **Rules with interfaces mark the moved public instance methods as virtual**. Interface dispatch only recognizes the vtable, and without the marker the CLR would determine the interface is not implemented and fail to load outright. So do not expect those methods to stay non-virtual when mixing in an interface.
-- **Same-named members are skipped**. When the target type already has a field or method with the same name, that one item is not moved and the rest proceed as usual. When two mods mix into the same target type, both land, and only the name-colliding part of the latter is skipped — gentler than the "latter fails entirely" behavior of hooks in [2.7](#27-do-two-mods-modifying-the-same-class-conflict-like-mixin).
-- **Nested types are not moved**, and nested types or generic methods in the source class are also currently outside this path's coverage.
+- **ロード時書き換えにのみ適用される**。対象型はまだメモリに入っていないカーネルアセンブリかModアセンブリにある必要がある。実行時注入はメソッド本体を提出するだけで型レイアウトを変更できないため、この形式は実行時注入には存在し得ない。
+- **コンストラクタの初期化子も付いてくる**。ソースクラスのフィールド初期化子に書かれた値は、対象型のすべてのインスタンスコンストラクタにマージされる。静的フィールド初期化子は静的コンストラクタにマージされる（対象に存在しない場合は作成される）。ソースクラスのコンストラクタ内の基底クラスへの連鎖呼び出しは取り除かれ、基底コンストラクタが二度実行されることはない。
+- **インターフェースを伴うルールは、移動したpublicインスタンスメソッドをvirtualにする**。インターフェースのディスパッチはvtableしか認識せず、このマークがないとCLRはインターフェースが実装されていないと判断し、ロードに失敗する。したがってインターフェースを混ぜ込むとき、それらのメソッドが非virtualのままだとは期待しないこと。
+- **同名メンバーはスキップされる**。対象型にすでに同名のフィールドやメソッドがある場合、その1項目は移動されず、残りは通常どおり進む。2つのModが同じ対象型に混ぜ込む場合、どちらも適用され、後者の名前が衝突する部分だけがスキップされる — [2.7](#27-同じクラスを変更する2つのmodはmixinのように競合するか) のフックの「後者が完全に失敗する」挙動より穏やかである。
+- **ネスト型は移動されない**。ソースクラス内のネスト型やジェネリックメソッドも現在この経路の対象外である。
 
-The source type must be in **the mod's own assembly**, so neither the manifest nor the annotation writes an assembly name.
+ソース型は**Mod自身のアセンブリ**にある必要があるため、マニフェストもアノテーションもアセンブリ名を書かない。
 
-### 2.9 Two routes: wrapper layer and extension points
+### 2.9 2つのルート：ラッパー層と拡張ポイント
 
-`NetCraft.ModApi`'s public surface is split into two namespaces, corresponding to two usages:
+`NetCraft.ModApi` の公開サーフェスは2つの名前空間に分かれ、2つの用途に対応する:
 
-| Namespace | Contents | What you get |
+| 名前空間 | 内容 | 得られるもの |
 | --- | --- | --- |
-| `NetCraft.ModApi.Wrapper` | `ServerEvents` / `ClientEvents` / `NetworkEvents`, `NcServer` / `NcWorld` / `NcPlayers` / `NcLists` / `NcRegistries` / `NcRecipes` / `NcStartup`, and object handles like `NcPlayer` / `NcLevel` | wrapper types; no kernel types on the public surface |
-| `NetCraft.ModApi.Extension` | `[Inject]` / `[Mixin]` annotations | rules bind to kernel class and method names |
+| `NetCraft.ModApi.Wrapper` | `ServerEvents` / `ClientEvents` / `NetworkEvents`、`NcServer` / `NcWorld` / `NcPlayers` / `NcLists` / `NcRegistries` / `NcRecipes` / `NcStartup`、および `NcPlayer` / `NcLevel` のようなオブジェクトハンドル | ラッパー型。公開サーフェスにカーネル型はない |
+| `NetCraft.ModApi.Extension` | `[Inject]` / `[Mixin]` アノテーション | ルールがカーネルのクラス名とメソッド名に束縛される |
 
-The two are **parallel** routes, not one layered on top of the other:
+両者は**並列**のルートであり、一方が他方の上に重なるものではない:
 
-- **For stability, use `Wrapper`**. The facades handle the kernel's tedious call ordering for you (writing a single block while touching the level, the player list, and the sync chain is one example), and event args are all wrapper types. The cost is that capabilities the facades do not expose are unavailable to you.
-- **For completeness, use `Extension`**. Injection rules modify kernel classes and methods directly, but the target names you write are the kernel's names, so when the kernel changes the rules must change with it.
+- **安定性を求めるなら `Wrapper` を使う**。ファサードがカーネルの面倒な呼び出し順序を処理してくれる（1つのブロックを書き込みながらレベル、プレイヤーリスト、同期チェーンに触れるのが一例）。イベントの args もすべてラッパー型である。代償は、ファサードが公開していない機能は使えないことである。
+- **網羅性を求めるなら `Extension` を使う**。注入ルールはカーネルのクラスとメソッドを直接変更するが、書く対象名はカーネルの名前であるため、カーネルが変わればルールもそれに合わせて変えなければならない。
 
-You can reference both. The `Wrapper` line is being consolidated toward "no kernel types on the public surface"; the player and level parts are done — `Player` / `Attacker` in player events and the in/out parameters of `NcPlayers` are `NcPlayer` handles, `NcWorld.Overworld` / `Nether` / `End` / `Get` and `LevelTickArgs.Level` are `NcLevel` handles, and block coordinates are plain `x y z` ints; entities and the remaining value types (`BlockPos` / `BlockState` / `Vec3`) are not wrapped yet.
+両方を参照できる。`Wrapper` の路線は「公開サーフェスにカーネル型を出さない」方向へ統合されつつある。プレイヤーとレベルの部分は完了している — プレイヤーイベントの `Player` / `Attacker` と `NcPlayers` の入出力パラメータは `NcPlayer` ハンドル、`NcWorld.Overworld` / `Nether` / `End` / `Get` と `LevelTickArgs.Level` は `NcLevel` ハンドル、ブロック座標は単なる `x y z` の int である。エンティティと残りの値型（`BlockPos` / `BlockState` / `Vec3`）はまだラップされていない。
 
-One more boundary to call out: **the wrapper layer does not shield injection**. The `hooks` rules or `[Inject]` annotations you write still bind to kernel class and method names, and break just the same when the kernel changes.
+もう1つ挙げておく境界: **ラッパー層は注入を遮蔽しない**。書く `hooks` ルールや `[Inject]` アノテーションは依然としてカーネルのクラス名とメソッド名に束縛され、カーネルが変われば同じように壊れる。
 
 ---
 
-## 3. Migrating from Fabric
+## 3. Fabricからの移行
 
-### 3.1 Concept mapping
+### 3.1 概念の対応
 
 | Fabric | NetCraft |
 | --- | --- |
-| `fabric.mod.json` | the `ncmod.json` embedded in the dll |
-| `ModInitializer.onInitialize()` | the entry class's `public Task Init()` |
-| `@Inject` / `@Redirect` | the `[Inject]` annotation, or rules like `Mark` / `Probe` / `CallSite` in `hooks` |
-| `@ModifyVariable` | `LocalRead` / `LocalWrite`, see [2.5](#25-in-method-body-anchors-local-variables-and-constants); not writable as an annotation |
-| `@ModifyConstant` | `Constant`, see [2.5](#25-in-method-body-anchors-local-variables-and-constants); not writable as an annotation |
-| `@Accessor` | no equivalent yet (`private` members need no visibility widening; just write a rule) |
-| `Registry.register(...)` | the kernel registry (`BuiltInRegistries`) |
+| `fabric.mod.json` | dllに埋め込まれた `ncmod.json` |
+| `ModInitializer.onInitialize()` | エントリクラスの `public Task Init()` |
+| `@Inject` / `@Redirect` | `[Inject]` アノテーション、または `hooks` 内の `Mark` / `Probe` / `CallSite` のようなルール |
+| `@ModifyVariable` | `LocalRead` / `LocalWrite`。[2.5](#25-メソッド本体内のアンカーローカル変数と定数) 参照。アノテーションとしては書けない |
+| `@ModifyConstant` | `Constant`。[2.5](#25-メソッド本体内のアンカーローカル変数と定数) 参照。アノテーションとしては書けない |
+| `@Accessor` | まだ相当するものはない（`private` メンバーは可視性を広げる必要がなく、ルールを書けばよい） |
+| `Registry.register(...)` | カーネルのレジストリ（`BuiltInRegistries`） |
 | `ServerLifecycleEvents.SERVER_STARTED` | `ServerEvents.Started` |
 | `ServerTickEvents.END_SERVER_TICK` | `ServerEvents.Tick` |
 | `CommandRegistrationCallback` | `ServerEvents.CommandRegister` |
 | `ClientTickEvents.END_CLIENT_TICK` | `ClientEvents.Tick` |
-| `FabricLoader.getInstance().getModContainer(id)` | no equivalent yet (`ModManager` is not open to mods) |
-| `@Mixin` / `@Unique` / `@Implements` | the `[Mixin]` annotation or the manifest's `mixins`, see [2.8](#28-mixins-adding-members-to-a-target-type) |
+| `FabricLoader.getInstance().getModContainer(id)` | まだ相当するものはない（`ModManager` はModに公開されていない） |
+| `@Mixin` / `@Unique` / `@Implements` | `[Mixin]` アノテーション、またはマニフェストの `mixins`。[2.8](#28-mixinターゲット型にメンバーを追加する) 参照 |
 
-### 3.2 What does not carry over
+### 3.2 引き継げないもの
 
-- **Mixin's annotation system**: NC has two annotations, `[Inject]` and `[Mixin]`, both of which are only **declaration styles**, equivalent to `hooks` / `mixins` in `ncmod.json` and merged at assembly (they are resolved by the loader, not `Lead.Hook`, see [2.1](#21-injection-styles-annotations-or-manifest-pick-one)). Instruction rewriting lands at load time by default, and can be changed to runtime submission per [2.6](#26-runtime-injection-modifying-already-running-code); adding members and interfaces goes through the mixins of [2.8](#28-mixins-adding-members-to-a-target-type). Targeting has no `@At`-style string syntax, but forms like `CallSite`/`FieldRead`/`LocalWrite`/`Constant`, together with `Ordinal`, `InType`/`InMethod`, and `Placement`, can cover the usages of `HEAD`/`RETURN`/`INVOKE`/`FIELD`/`NEW`/`CONSTANT`/`LOAD`/`STORE` and `shift`; what is missing is `JUMP`.
-- **AccessWidener**: none. Visibility is no obstacle to IL rewriting in NC; `private` methods can be hooked the same way (the rewriter works at the byte level).
-- **Yarn / Mojang mappings**: not needed. NC is C# source translated directly from vanilla, with type and method names corresponding to vanilla, only with naming style following C#.
-- **The vast majority of Fabric API modules**: only capabilities covered by `NetCraft-ModApi` are available; for the rest, write your own injection rules or wait for the API to catch up.
+- **Mixinのアノテーションシステム**: NCには `[Inject]` と `[Mixin]` の2つのアノテーションがあり、どちらも**宣言スタイル**にすぎず、`ncmod.json` の `hooks` / `mixins` と等価で、アセンブリ時にマージされる（解決するのはローダーであり `Lead.Hook` ではない。[2.1](#21-注入スタイルアノテーションかマニフェストかどちらかを選ぶ) 参照）。命令の書き換えはデフォルトでロード時に適用され、[2.6](#26-実行時注入すでに実行中のコードを変更する) に従って実行時提出に変更できる。メンバーとインターフェースの追加は [2.8](#28-mixinターゲット型にメンバーを追加する) のmixinを通る。対象指定に `@At` 風の文字列構文はないが、`CallSite`/`FieldRead`/`LocalWrite`/`Constant` といった形式と、`Ordinal`、`InType`/`InMethod`、`Placement` を組み合わせれば `HEAD`/`RETURN`/`INVOKE`/`FIELD`/`NEW`/`CONSTANT`/`LOAD`/`STORE` や `shift` の用法をカバーできる。欠けているのは `JUMP` である。
+- **AccessWidener**: なし。NCでは可視性はIL書き換えの障害にならない。`private` メソッドも同様にフックできる（リライタはバイトレベルで動作する）。
+- **Yarn / Mojang マッピング**: 不要。NCはバニラから直接翻訳されたC#ソースで、型名とメソッド名はバニラに対応し、命名スタイルだけがC#に従う。
+- **Fabric APIのモジュールの大半**: 利用できるのは `NetCraft-ModApi` がカバーする機能だけである。それ以外は自分で注入ルールを書くか、APIが追いつくのを待つ。
 
-### 3.3 A side-by-side example
+### 3.3 並べて比較する例
 
-Fabric: log a line when the server starts and register a command.
+Fabric: サーバ起動時に1行ログを出し、コマンドを1つ登録する。
 
 ```java
 public class MyMod implements ModInitializer {
@@ -469,7 +469,7 @@ public sealed class MyModEntry
 }
 ```
 
-Manifest (`ncmod.json`, as an embedded resource):
+マニフェスト（`ncmod.json`、埋め込みリソースとして）:
 
 ```json
 {
@@ -481,28 +481,28 @@ Manifest (`ncmod.json`, as an embedded resource):
 }
 ```
 
-Note: even an empty `hooks` works here — events like `ServerEvents.Started` are provided by `NetCraft-ModApi`'s own probes, and your mod only needs to subscribe (`ServerEvents` is under `NetCraft.ModApi.Wrapper`, see [2.9](#29-two-routes-wrapper-layer-and-extension-points)). You only need to write your own hook rules when you want to hook a place in the kernel where ModApi does not yet provide an event.
+注: ここでは空の `hooks` でも機能する — `ServerEvents.Started` のようなイベントは `NetCraft-ModApi` 自身のプローブが提供し、あなたのModは購読するだけでよい（`ServerEvents` は `NetCraft.ModApi.Wrapper` の下にある。[2.9](#29-2つのルートラッパー層と拡張ポイント) 参照）。自分でフックルールを書く必要があるのは、ModApiがまだイベントを提供していないカーネルの場所をフックしたい場合だけである。
 
 ---
 
-## 4. Basic requirements for an ncm
+## 4. ncmの基本要件
 
-ncm means NetCraft mod. An ncm is a .NET class library dll embedding an `ncmod.json`, placed in the `mods/` directory.
+ncmはNetCraft modの略である。ncmは `ncmod.json` を埋め込んだ .NET クラスライブラリのdllで、`mods/` ディレクトリに置かれる。
 
-The easiest way to start is the template:
+手っ取り早い始め方はテンプレートを使うことである:
 
 ```
 dotnet new install NetCraft.ModsProjectType
 dotnet new ncm -n MyMod -e server
 ```
 
-If the local package has not been published yet, use `dotnet new install <nupkg path>`, or run `dotnet pack` in the repository and then install the output.
+ローカルパッケージがまだ公開されていない場合は `dotnet new install <nupkg path>` を使うか、リポジトリで `dotnet pack` を実行してから出力をインストールする。
 
-`-e` takes `both` (default) / `server` / `client`, determining the manifest's `environment` and which side's subscription code is generated in the entry class. The template ships the NC reference assemblies, so no project reference is needed, and `ncmod.json`'s id / entry are filled in from the project name.
+`-e` は `both`（デフォルト）/ `server` / `client` を取り、マニフェストの `environment` と、エントリクラスにどちらのサイドの購読コードを生成するかを決める。テンプレートはNCの参照アセンブリを同梱するためプロジェクト参照は不要で、`ncmod.json` の id / entry はプロジェクト名から埋められる。
 
-Starting at 4.1, the following covers what a hand-written project must satisfy.
+4.1 以降では、手書きのプロジェクトが満たすべき事項を述べる。
 
-### 4.1 Project file
+### 4.1 プロジェクトファイル
 
 ```xml
 <Project Sdk="Microsoft.NET.Sdk">
@@ -513,7 +513,7 @@ Starting at 4.1, the following covers what a hand-written project must satisfy.
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Private must be turned off, otherwise the NC assemblies get embedded into the mod dll by EmbedDependencies in 4.6 -->
+    <!-- Private をオフにしないと、NCのアセンブリが 4.6 の EmbedDependencies によってModのdllに埋め込まれてしまう -->
     <ProjectReference Include="xxx\NetCraft\NetCraft.csproj" Private="false" />
     <ProjectReference Include="xxx\NetCraft.ModApi\NetCraft.ModApi.csproj" Private="false" />
   </ItemGroup>
@@ -524,11 +524,11 @@ Starting at 4.1, the following covers what a hand-written project must satisfy.
 </Project>
 ```
 
-`LogicalName` must be `ncmod.json`; the scanner recognizes only that name.
+`LogicalName` は `ncmod.json` でなければならない。スキャナはその名前しか認識しない。
 
-The template takes a different route: assembly references under `libs/` (`Reference Include="libs\*.dll" Private="false"`). Follow that when you do not have the NC source. What both approaches share is that **NC's own dlls must never enter the output directory** — `EmbedDependencies` from [4.6](#46-third-party-dependencies) embeds third-party dlls from the output directory into the mod, and if NC's assemblies get embedded too there will be two sets of type identity.
+テンプレートは別のルートを取る: `libs/` 配下のアセンブリ参照（`Reference Include="libs\*.dll" Private="false"`）である。NCのソースがない場合はこちらに従う。両方式に共通するのは、**NC自身のdllを絶対に出力ディレクトリに入れてはならない**ことである — [4.6](#46-サードパーティ依存関係) の `EmbedDependencies` は出力ディレクトリのサードパーティdllをModに埋め込むため、NCのアセンブリまで埋め込まれると型の同一性が二重になる。
 
-### 4.2 ncmod.json fields
+### 4.2 ncmod.json のフィールド
 
 ```json
 {
@@ -546,23 +546,23 @@ The template takes a different route: assembly references under `libs/` (`Refere
 }
 ```
 
-| Field | Required | Notes |
+| フィールド | 必須 | 備考 |
 | --- | --- | --- |
-| `id` | Yes | mod identifier, used by dependencies and lookups. An empty string is skipped by the scanner |
-| `version` | Recommended | version number; when depended on by other mods, version constraints are judged by it, see below |
-| `name` | No | display name; this is what the mod page shows, defaulting back to `id` |
-| `description` | No | one-line description |
-| `authors` / `contributors` | No | credits, a string array |
-| `license` | No | license identifier |
-| `contact` | No | external links; may take `homepage` / `sources` / `issues` |
-| `icon` | No | the icon's embedded resource name, see 4.7 |
-| `environment` | No | `both` / `client` / `server`, default `both`. When it does not match the current side the whole mod is not loaded |
-| `entry` | Yes | full name of the entry class; the class must have `public Task Init()` |
-| `depends` | No | other mods it depends on and required versions, see below |
-| `hooks` | No | list of injection rules; an empty array means subscribing only to events ModApi already has |
-| `mixins` | No | list of mixin rules; moves members of one of this mod's classes into the target type, see [2.8](#28-mixins-adding-members-to-a-target-type) |
+| `id` | はい | Mod識別子。依存関係と検索に使われる。空文字列はスキャナにスキップされる |
+| `version` | 推奨 | バージョン番号。他のModから依存されるとき、バージョン制約はこれで判定される。後述 |
+| `name` | いいえ | 表示名。Modページに表示されるもので、デフォルトでは `id` に戻る |
+| `description` | いいえ | 1行の説明 |
+| `authors` / `contributors` | いいえ | クレジット。文字列配列 |
+| `license` | いいえ | ライセンス識別子 |
+| `contact` | いいえ | 外部リンク。`homepage` / `sources` / `issues` を取れる |
+| `icon` | いいえ | アイコンの埋め込みリソース名。4.7 参照 |
+| `environment` | いいえ | `both` / `client` / `server`、デフォルトは `both`。現在のサイドと一致しない場合、Mod全体がロードされない |
+| `entry` | はい | エントリクラスの完全名。クラスは `public Task Init()` を持たなければならない |
+| `depends` | いいえ | 依存する他のModと要求バージョン。後述 |
+| `hooks` | いいえ | 注入ルールのリスト。空配列は、ModApiがすでに持つイベントを購読するだけを意味する |
+| `mixins` | いいえ | mixinルールのリスト。このModのクラスのメンバーを対象型へ移動する。[2.8](#28-mixinターゲット型にメンバーを追加する) 参照 |
 
-`depends` declares other mods it depends on and required versions; the key is a mod id and the value is a version constraint:
+`depends` は依存する他のModと要求バージョンを宣言する。キーはModのidで、値はバージョン制約である:
 
 ```json
 {
@@ -573,34 +573,34 @@ The template takes a different route: assembly references under `libs/` (`Refere
 }
 ```
 
-**Dependencies not written into `depends` carry no version constraint**. Inter-mod dependencies are already inferred automatically from compile-time references (see [6.1](#61-mod-dependency--injecting-the-depended-on-mod)), and `depends` only adds version constraints on top. When the depended-on mod is not on the current side the check is skipped — that case is left to assembly resolution to report.
+**`depends` に書かれていない依存関係はバージョン制約を持たない**。Mod間の依存関係はコンパイル時の参照からすでに自動推論され（[6.1](#61-mod依存関係と依存先modへの注入) 参照）、`depends` はその上にバージョン制約を追加するだけである。依存先のModが現在のサイドにない場合はチェックがスキップされる — その場合はアセンブリ解決が報告するに委ねられる。
 
-| Constraint syntax | Meaning |
+| 制約構文 | 意味 |
 | --- | --- |
-| `*` | any version, equivalent to omitting the entry |
-| `1.2.3` | segment prefix; `1.2` matches `1.2` and `1.2.9` but not `1.3` |
-| `^1.2.3` | same major version and not less than the baseline; when the major version is 0 the minor version is used instead, so `0.1` and `0.2` count as incompatible |
-| `>=1.2.3` | not less than the baseline |
+| `*` | 任意のバージョン。項目を省略するのと等価 |
+| `1.2.3` | セグメントプレフィックス。`1.2` は `1.2` と `1.2.9` にマッチするが `1.3` にはマッチしない |
+| `^1.2.3` | 同じメジャーバージョンで、基準以上。メジャーバージョンが0の場合は代わりにマイナーバージョンを使うため、`0.1` と `0.2` は非互換とみなされる |
+| `>=1.2.3` | 基準以上 |
 
-Version numbers take only the leading digits of each segment, so `26.2-netcraft` participates as `26.2`. When versions do not match, **only the declaring mod is skipped** and the rest load as usual; the startup log states "dependency X requires version …, actual version …".
+バージョン番号は各セグメントの先頭の数字のみを取るため、`26.2-netcraft` は `26.2` として扱われる。バージョンが一致しない場合、**宣言したModだけがスキップされ**、残りは通常どおりロードされる。起動ログには「依存関係 X はバージョン … を要求、実際のバージョン …」と記される。
 
-The judgment basis is the `version` field in the depended-on mod's manifest. So **a mod intended to be depended on must set `version` correctly** — an empty version number satisfies no specific constraint.
+判定の根拠は依存先Modのマニフェストの `version` フィールドである。したがって**依存されることを意図したModは `version` を正しく設定しなければならない** — 空のバージョン番号はどの特定の制約も満たさない。
 
-### 4.3 hook rule fields
+### 4.3 hookルールのフィールド
 
-| Field | Notes |
+| フィールド | 備考 |
 | --- | --- |
-| `target` | full name of the target type; must be in a kernel assembly or one of the mod assemblies under `mods/` |
-| `method` | target method name; same-name overloads all match |
-| `type` | injection form, see the appendix |
-| `patchMode` | landing method, `ILRewrite` (default) or `RuntimeInject`, see [2.6](#26-runtime-injection-modifying-already-running-code) |
-| `ordinal` | when the same anchor matches multiple places in the host method, pick which, 0-based, see [2.4](#24-narrowing-to-one-site-host-scoping-and-placement) |
-| `replaceType` | full name of the class containing the replacement method |
-| `replaceMethod` | replacement method name |
-| `label` | probe label, used only by `Mark` and `Probe` |
-| `environment` | the side the rule applies to, default `both`; a rule targeting a server type run on the client has no target at all and is filtered out by `environment` |
+| `target` | 対象型の完全名。カーネルアセンブリか `mods/` 配下のModアセンブリのいずれかにある必要がある |
+| `method` | 対象メソッド名。同名のオーバーロードはすべてマッチする |
+| `type` | 注入形式。付録参照 |
+| `patchMode` | 適用方法。`ILRewrite`（デフォルト）または `RuntimeInject`。[2.6](#26-実行時注入すでに実行中のコードを変更する) 参照 |
+| `ordinal` | 同じアンカーがホストメソッド内の複数箇所にマッチするとき、どれを選ぶか（0始まり）。[2.4](#24-1箇所への絞り込みホストのスコープと配置) 参照 |
+| `replaceType` | 置換メソッドを含むクラスの完全名 |
+| `replaceMethod` | 置換メソッド名 |
+| `label` | プローブのラベル。`Mark` と `Probe` のみが使う |
+| `environment` | ルールが適用されるサイド。デフォルトは `both`。サーバ型を対象とするルールをクライアントで実行すると対象が全く存在せず、`environment` によって除外される |
 
-The same rule can also be written as an annotation on the replacement method; the correspondence is:
+同じルールは置換メソッド上のアノテーションとしても書ける。対応は次のとおり:
 
 ```csharp
 [Inject(typeof(SomeType), nameof(SomeType.SomeMethod),
@@ -608,45 +608,45 @@ The same rule can also be written as an annotation on the replacement method; th
 public static void OnSomeMethod(object self) { }
 ```
 
-| Manifest field | Annotation form |
+| マニフェストのフィールド | アノテーションの形式 |
 | --- | --- |
-| `target` | the first constructor parameter, written as `typeof(...)` |
-| `method` | the second constructor parameter, preferably `nameof(...)` |
-| `type` | named parameter `HookType`, default `CallSite` |
-| `patchMode` | named parameter `PatchMode`, default `ILRewrite` |
-| `ordinal` | named parameter `Ordinal` |
-| `label` | named parameter `Label` |
-| `environment` | named parameter `Environment`, default `both` |
-| `replaceType` | not written; taken automatically from the class it annotates |
-| `replaceMethod` | not written; taken automatically from the method it annotates |
+| `target` | 最初のコンストラクタパラメータ。`typeof(...)` として書く |
+| `method` | 2番目のコンストラクタパラメータ。できれば `nameof(...)` |
+| `type` | 名前付きパラメータ `HookType`、デフォルトは `CallSite` |
+| `patchMode` | 名前付きパラメータ `PatchMode`、デフォルトは `ILRewrite` |
+| `ordinal` | 名前付きパラメータ `Ordinal` |
+| `label` | 名前付きパラメータ `Label` |
+| `environment` | 名前付きパラメータ `Environment`、デフォルトは `both` |
+| `replaceType` | 書かない。注釈を付けたクラスから自動的に取られる |
+| `replaceMethod` | 書かない。注釈を付けたメソッドから自動的に取られる |
 
-The annotations come from `InjectAttribute` in `NetCraft.ModApi.Extension`, so mods using annotations must reference it. When annotations and the manifest both exist they are merged, and if the same injection point is declared in both **the annotation wins**.
+アノテーションは `NetCraft.ModApi.Extension` の `InjectAttribute` に由来するため、アノテーションを使うModはこれを参照する必要がある。アノテーションとマニフェストが両方存在する場合はマージされ、同じ注入ポイントが両方で宣言されている場合は**アノテーションが優先される**。
 
-Mixin rules use a different set of fields: `target` (full name of the target type), `source` (full name of the source type, which must be in the mod's own assembly), `interfaces` (optional, an array of interface full names); for semantics see [2.8](#28-mixins-adding-members-to-a-target-type). `[Mixin(typeof(target))]` on the source class is equivalent to the manifest entry.
+Mixinルールは別のフィールド群を使う: `target`（対象型の完全名）、`source`（ソース型の完全名。Mod自身のアセンブリにある必要がある）、`interfaces`（省略可能。インターフェースの完全名の配列）。意味論は [2.8](#28-mixinターゲット型にメンバーを追加する) 参照。ソースクラスの `[Mixin(typeof(target))]` はマニフェストの項目と等価である。
 
-### 4.4 What can and cannot be hooked
+### 4.4 フックできるものとできないもの
 
-Can be hooked: kernel assemblies under `kernel/`, and other mods under `mods/`.
+フックできるもの: `kernel/` 配下のカーネルアセンブリ、および `mods/` 配下の他のMod。
 
-Cannot be hooked:
+フックできないもの:
 
-- the main library `NetCraft.dll`
-- the loader `NetCraft.ModLoader.dll`
-- entry assemblies (`NetCraft.Server.Exe.dll`, etc.)
+- メインライブラリ `NetCraft.dll`
+- ローダー `NetCraft.ModLoader.dll`
+- エントリアセンブリ（`NetCraft.Server.Exe.dll` など）
 
-Every hook's `target` must be findable in the kernel or in some mod assembly, otherwise assembly reports "the injection target is not in any known assembly". Note that **a namespace does not imply an assembly** — `NetCraft.Game.Server.DedicatedServer` actually lives in `NetCraft.Server.dll`; the loader looks it up by an index built from metadata tables, so just write the full name.
+すべてのフックの `target` はカーネルかいずれかのModアセンブリで見つけられなければならない。そうでないとアセンブリは「注入対象がどの既知のアセンブリにもない」と報告する。**名前空間はアセンブリを意味しない**点に注意 — `NetCraft.Game.Server.DedicatedServer` は実際には `NetCraft.Server.dll` にある。ローダーはメタデータテーブルから構築したインデックスでこれを探すため、完全名を書けばよい。
 
-Mod injection of mods follows the same system: the target mod is rewritten **the moment it is itself loaded**, regardless of the order in `mods/`. Cyclic rules (A injects B and B injects A) report "cyclic loading" at load time; such rules have no solution at the IL rewriting level, so just remove one of them.
+ModによるModへの注入も同じ仕組みに従う: 対象Modは**それ自体がロードされた瞬間**に書き換えられ、`mods/` 内の順序にはよらない。循環ルール（AがBを、BがAを注入する）はロード時に「循環ロード」と報告される。そのようなルールはIL書き換えのレベルでは解決策がないため、一方を削除するだけでよい。
 
-Note the injected mod **cannot be your own mod** — self-injection also counts as a cycle.
+注入されるModは**自分のModであってはならない**点に注意 — 自己注入も循環とみなされる。
 
-### 4.5 Deployment
+### 4.5 デプロイ
 
-Copy the compiled dll into the output directory's `mods/` (top level, no subdirectory recursion) and restart the process.
+コンパイルしたdllを出力ディレクトリの `mods/`（最上位。サブディレクトリの再帰はない）へコピーし、プロセスを再起動する。
 
-**This step is already automated by the build**: `DeployModToHosts` in `NetCraft.ModApi.csproj` copies the dll into the `mods/` directory of each host project's output directory after building. The host list is the `ModHostProjects` property; when creating your own host project, just add its name. If no rule takes effect and there is no error at all, first check whether the dll in the host project's `mods/` is stale.
+**このステップはすでにビルドで自動化されている**: `NetCraft.ModApi.csproj` の `DeployModToHosts` がビルド後にdllを各ホストプロジェクトの出力ディレクトリの `mods/` ディレクトリへコピーする。ホストのリストは `ModHostProjects` プロパティである。自分のホストプロジェクトを作るときは、その名前を追加するだけでよい。ルールが全く効かずエラーも全く出ない場合は、まずホストプロジェクトの `mods/` 内のdllが古くないか確認する。
 
-The startup log prints:
+起動ログは次のように出力する:
 
 ```
 Rewrote and preloaded assembly NetCraft.Server
@@ -655,26 +655,26 @@ Mod scan finished: 1 found, injection targets NetCraft.Server,NetCraft.Game runt
 Mod init finished: 1 loaded, 0 skipped
 ```
 
-Troubleshooting order:
+トラブルシューティングの順序:
 
-- No rule takes effect: first check whether the dll in `mods/` is stale (most common).
-- If you do not see `Rewrote and preloaded assembly`, the target assembly was already loaded before the bootstrap, so the rule was written too late.
-- If you see `injection targets` but the target is wrong, it is usually a mistyped `target`; follow [4.4](#44-what-can-and-cannot-be-hooked) to check which assembly the type belongs to.
-- A rule with `environment` set to `client` is silently skipped on the server (a mismatch at the mod level means the whole mod is not loaded); this is expected behavior, not a fault.
+- どのルールも効かない: まず `mods/` 内のdllが古くないか確認する（最もよくある）。
+- `Rewrote and preloaded assembly` が見当たらない場合、対象アセンブリはブートストラップ前にすでにロードされており、ルールの記述が遅すぎた。
+- `injection targets` は見えるが対象が間違っている場合、通常は `target` の打ち間違いである。[4.4](#44-フックできるものとできないもの) に従い、その型がどのアセンブリに属するか確認する。
+- `environment` が `client` に設定されたルールはサーバ上で黙ってスキップされる（Modレベルでの不一致はMod全体がロードされないことを意味する）。これは想定された挙動であり、不具合ではない。
 
-### 4.6 Third-party dependencies
+### 4.6 サードパーティ依存関係
 
-Corresponds to Fabric's Jar-in-Jar.
+FabricのJar-in-Jarに対応する。
 
-Projects created from the template **do not need to worry about this**: libraries added via `dotnet add package` are automatically embedded into the mod dll at build time, and when the loader cannot resolve an assembly it looks through the mod's embedded `.dll` resources.
+テンプレートから作成したプロジェクトでは**これを気にする必要はない**: `dotnet add package` で追加したライブラリはビルド時に自動でModのdllに埋め込まれ、ローダーがアセンブリを解決できないときはModの埋め込み `.dll` リソースを探す。
 
 ```
 dotnet add package Newtonsoft.Json
 ```
 
-That's all; `ncmod.json` needs no changes.
+これだけである。`ncmod.json` の変更は不要。
 
-A hand-written project must copy the `EmbedDependencies` target from the template csproj, or embed it yourself:
+手書きのプロジェクトはテンプレートのcsprojから `EmbedDependencies` ターゲットをコピーするか、自分で埋め込む必要がある:
 
 ```xml
 <ItemGroup>
@@ -682,21 +682,21 @@ A hand-written project must copy the `EmbedDependencies` target from the templat
 </ItemGroup>
 ```
 
-Dependencies are not written into the manifest; resolution only looks at the mod's embedded `.dll` resources, and it just needs the resource name to match the assembly name.
+依存関係はマニフェストには書かれない。解決はModの埋め込み `.dll` リソースだけを見て、リソース名がアセンブリ名と一致していればよい。
 
-Three notes:
+3つの注意点:
 
-- **Matching is by assembly name**. The loader compares the requested assembly name: after removing `.dll`, the resource name either equals the assembly name or ends with `.` + the assembly name. So both `MyLib.dll` and the default `MyProject.deps.MyLib.dll` work.
-- **Only the mod's own embedded resources are recognized**. Libraries not embedded cannot be resolved and will not be searched for elsewhere.
-- **Resolution order is kernel first**. `EmbeddedAssemblyLoader` looks among kernel assemblies and embedded sub-libraries first, and only falls back to mods if nothing is found, so mods should not embed assemblies with the same name as kernel ones.
+- **照合はアセンブリ名で行う**。ローダーは要求されたアセンブリ名を比較する: `.dll` を除いた後、リソース名がアセンブリ名と等しいか、`.` + アセンブリ名で終わればよい。したがって `MyLib.dll` とデフォルトの `MyProject.deps.MyLib.dll` のどちらも機能する。
+- **認識されるのはMod自身の埋め込みリソースだけである**。埋め込まれていないライブラリは解決できず、他所を探されることもない。
+- **解決順序はカーネルが先である**。`EmbeddedAssemblyLoader` はまずカーネルアセンブリと埋め込みサブライブラリの中を探し、何も見つからない場合のみModにフォールバックする。そのためModはカーネルと同じ名前のアセンブリを埋め込むべきではない。
 
-The template's target uses `WithMetadataValue` to filter `.dll` rather than writing `Condition`, because the template engine evaluates `Condition` in `.csproj` at template time, when `%(...)` has no value, and the whole line would be deleted.
+テンプレートのターゲットは `Condition` を書かずに `WithMetadataValue` で `.dll` をフィルタする。テンプレートエンジンはテンプレート時に `.csproj` の `Condition` を評価し、そのとき `%(...)` には値がないため、行全体が削除されてしまうからである。
 
-### 4.7 Icon and display info
+### 4.7 アイコンと表示情報
 
-Name, description, authors, links, and icon are all written in `ncmod.json`, corresponding to `name` / `description` / `authors` / `contact` / `icon` in vanilla's `fabric.mod.json`.
+名前、説明、作者、リンク、アイコンはすべて `ncmod.json` に書かれ、バニラの `fabric.mod.json` の `name` / `description` / `authors` / `contact` / `icon` に対応する。
 
-**The icon is an embedded resource**, not an external file, using the same resource-naming convention as embedded dependencies:
+**アイコンは埋め込みリソース**であり、外部ファイルではない。埋め込み依存関係と同じリソース命名規則を使う:
 
 ```xml
 <ItemGroup>
@@ -708,50 +708,50 @@ Name, description, authors, links, and icon are all written in `ncmod.json`, cor
 { "icon": "icon.png" }
 ```
 
-The template already ships an `icon.png` with both places configured; just replace that image. A 64×64 or 128×128 PNG is recommended.
+テンプレートはすでに `icon.png` を同梱し、両方の箇所が設定済みである。その画像を置き換えるだけでよい。64×64 または 128×128 のPNGを推奨する。
 
-The icon lookup order is: what the manifest's `icon` points to → an embedded resource named `icon.png` → if neither exists, the UI's default image (a gray question mark).
+アイコンの検索順序は: マニフェストの `icon` が指すもの → `icon.png` という名前の埋め込みリソース → どちらも存在しない場合はUIのデフォルト画像（灰色の疑問符）。
 
-This information is visible on the **MODS** page of the server GUI. On the left is the mod list (small icon + display name + version + status); on the right are the description, credits, links, dependencies, initialization time, and injection rules of the selected one. Mod names in the dependency column are clickable and jump straight to that entry.
+この情報はサーバGUIの**MODS**ページで見られる。左側がModリスト（小さいアイコン + 表示名 + バージョン + 状態）で、右側が選択中のものの説明、クレジット、リンク、依存関係、初期化時間、注入ルールである。依存関係の列のMod名はクリックでき、その項目へ直接ジャンプする。
 
-Mods that failed to load or were skipped are also in the list, marked in the status column — when diagnosing "why did my mod not take effect", check this column first.
-
----
-
-## 5. Known limitations
-
-- **Probe signatures may only use BCL types and `object`**, for the reason in 2.2; value-type parameters and return values are exceptions and must keep their real types.
-- **`CallSite` is a replacement**, and the replacement method must restore the original call itself, see 2.3. Private methods cannot be restored and require reflection.
-- **Dlls under `mods/` are deployed automatically by `DeployModToHosts`**; when creating your own host project, remember to add its name to `ModHostProjects`.
-- **Entry assemblies cannot be injected**: if your target and hook fall in an entry assembly, it is ineffective.
-- **The main library and loader cannot be hooked**; this is a design constraint preventing mods from changing the loading process itself.
-- **Mismatched `environment` means the whole mod is not loaded**, not "some rules fail".
-- **Runtime injection requires the native library**: rules using `RuntimeInject` require `lead_hook_native` to be attached at process start, and the loader restarts itself to do so; if the library is not found or the restart fails, this batch of rules is downgraded to a warning and startup is not blocked. For capability boundaries and cost see [2.6](#26-runtime-injection-modifying-already-running-code).
-- **Annotations have fewer fields than the C# API**: `InType` / `InMethod` / `Placement` / `LocalIndex` / `ConstantValue` cannot be written in `[Inject]` (`PatchMode` and `Ordinal` are supported), see [2.1](#21-injection-styles-annotations-or-manifest-pick-one).
-- **Mixins apply only to load-time rewriting**, and members in the source class are moved rather than copied; nested types and generic methods in the source class are outside coverage, and methods mixed in with an interface are marked virtual. See [2.8](#28-mixins-adding-members-to-a-target-type).
-- When testing and debugging, if language tables or model resources are used, an `assets` directory (extracted from the vanilla jar) is required, otherwise the related features degrade to translation keys or placeholder textures.
+ロードに失敗したModやスキップされたModもリストにあり、状態列に表示される。「なぜ自分のModが効かないのか」を診断するときは、まずこの列を確認する。
 
 ---
 
-## 6. Known behaviors
+## 5. 既知の制限
 
-This section is a record of observed behavior, not a specification.
+- **プローブのシグネチャにはBCL型と `object` しか使えない**。理由は 2.2 にある。値型のパラメータと戻り値は例外で、本来の型を保たなければならない。
+- **`CallSite` は置換である**。置換メソッドは元の呼び出しを自分で復元しなければならない。2.3 参照。private メソッドは復元できず、リフレクションが必要である。
+- **`mods/` 配下のdllは `DeployModToHosts` が自動で配置する**。自分のホストプロジェクトを作るときは、`ModHostProjects` にその名前を追加するのを忘れないこと。
+- **エントリアセンブリには注入できない**: 対象とフックがエントリアセンブリにある場合、それは効かない。
+- **メインライブラリとローダーはフックできない**。これはModがロードプロセス自体を変更するのを防ぐ設計上の制約である。
+- **`environment` の不一致はMod全体がロードされないことを意味する**。「一部のルールが失敗する」ではない。
+- **実行時注入にはネイティブライブラリが必要である**: `RuntimeInject` を使うルールはプロセス開始時に `lead_hook_native` がアタッチされている必要があり、そのためにローダーは自身を再起動する。ライブラリが見つからないか再起動に失敗した場合、このバッチのルールは警告に降格され、起動は妨げられない。能力の境界とコストについては [2.6](#26-実行時注入すでに実行中のコードを変更する) を参照。
+- **アノテーションはC# APIよりフィールドが少ない**: `InType` / `InMethod` / `Placement` / `LocalIndex` / `ConstantValue` は `[Inject]` に書けない（`PatchMode` と `Ordinal` はサポートされる）。[2.1](#21-注入スタイルアノテーションかマニフェストかどちらかを選ぶ) 参照。
+- **Mixinはロード時書き換えにのみ適用される**。ソースクラスのメンバーはコピーではなく移動される。ソースクラスのネスト型とジェネリックメソッドは対象外で、インターフェースを伴って混ぜ込まれたメソッドはvirtualにされる。[2.8](#28-mixinターゲット型にメンバーを追加する) 参照。
+- テストやデバッグの際、言語テーブルやモデルリソースを使う場合は `assets` ディレクトリ（バニラのjarから抽出したもの）が必要である。そうでないと関連機能が翻訳キーやプレースホルダテクスチャに降格する。
 
-### 6.1 Mod dependency + injecting the depended-on mod
+---
 
-**Scenario**: b depends on a and also injects a.
+## 6. 既知の挙動
 
-**Conclusion**: it works and does not form a cycle.
+この節は観察された挙動の記録であり、仕様ではない。
 
-The chain has three steps:
+### 6.1 Mod依存関係と依存先Modへの注入
 
-1. The rule table is built purely by reading PE metadata, without loading any assembly. The rule "b injects a" requires neither a nor b to be present.
-2. `PreloadReplacers` loads all replacement classes (including b) before `ModManager`, at which point a is not loaded yet. `LoadFromStream` reads metadata only and does not JIT method bodies, so b's reference to a is lazy at this moment and loading does not fail.
-3. `ModManager` then topologically sorts by `AssemblyRef`, with a before b. When rewriting a, the replacement class b is already in `Default`, so the type is fetched directly and one `AssemblyRef` pointing to b is added to a's metadata. **a does not need to know b exists at all.**
+**シナリオ**: b が a に依存し、かつ a を注入する。
 
-**Hard requirement**: when referencing the injected mod in csproj, you must write `Private="false"`. By default it copies `a.dll` into the output directory, which is then embedded into `b.dll` by `EmbedDependencies` as an embedded dependency, and at runtime `ModLibs` resolving `a` picks up the second copy, causing type identity checks between the two to fail.
+**結論**: 機能し、循環にはならない。
 
-**Verification case**: two template projects `NetCraft.Test1` (a) and `NetCraft.Test2` (b); a provides `Test1Api.Greet` and calls it in its own `ModEntry.Server`, while b replaces that call site with `Test2Probe.OnGreet` and also calls `Greet` once in b's `ModEntry.Server` as a control. Actual run log:
+連鎖は3つのステップからなる:
+
+1. ルールテーブルはPEメタデータを読むだけで構築され、アセンブリを一切ロードしない。「bがaを注入する」というルールはaもbも存在することを要求しない。
+2. `PreloadReplacers` は `ModManager` より前にすべての置換クラス（bを含む）をロードし、この時点でaはまだロードされていない。`LoadFromStream` はメタデータを読むだけでメソッド本体をJITしないため、この瞬間のbからaへの参照は遅延であり、ロードは失敗しない。
+3. 次に `ModManager` が `AssemblyRef` でトポロジカルソートし、aがbより前になる。aを書き換えるとき、置換クラスbはすでに `Default` にあるため、型は直接取得され、bを指す `AssemblyRef` が1つaのメタデータに追加される。**aはbの存在を全く知る必要がない。**
+
+**厳守事項**: csprojで注入されるModを参照するときは `Private="false"` を書かなければならない。デフォルトでは `a.dll` を出力ディレクトリにコピーし、それが `EmbedDependencies` によって埋め込み依存関係として `b.dll` に埋め込まれ、実行時に `ModLibs` が `a` を解決する際に2つ目のコピーを拾い、両者間の型同一性チェックが失敗する原因になる。
+
+**検証ケース**: 2つのテンプレートプロジェクト `NetCraft.Test1`（a）と `NetCraft.Test2`（b）。aは `Test1Api.Greet` を提供し自身の `ModEntry.Server` でこれを呼び、bはその呼び出し箇所を `Test2Probe.OnGreet` に置換し、対照としてbの `ModEntry.Server` でも `Greet` を1回呼ぶ。実際の実行ログ:
 
 ```
 Mod netcraft.test2 injects NetCraft.Test1!NetCraft.Test1.Test1Api::Greet replaced by NetCraft.Test2.Test2Probe::OnGreet [CallSite/ILRewrite]
@@ -760,21 +760,21 @@ Test1 internal greeting: Test2-rewritten greeting self    ← injection took eff
 Test2 internal greeting: Test1 original greeting test2    ← control group: the rule only rewrites the target assembly, so b's own internal call site is untouched
 ```
 
-Dependencies derive order only from `AssemblyRef` and carry no version constraint. To constrain versions, declare them in the manifest's `depends`, see [4.2](#42-ncmodjson-fields).
+依存関係は `AssemblyRef` からのみ順序を導き、バージョン制約を持たない。バージョンを制約するにはマニフェストの `depends` で宣言する。[4.2](#42-ncmodjson-のフィールド) 参照。
 
-### 6.2 Annotation injection
+### 6.2 アノテーションによる注入
 
-**Scenario**: `[Inject(typeof(X), nameof(X.M))]` on the replacement method, with no rule in `ncmod.json`.
+**シナリオ**: 置換メソッドに `[Inject(typeof(X), nameof(X.M))]` を付け、`ncmod.json` にはルールがない。
 
-**Conclusion**: it works and needs no manifest declaration. Annotations and the manifest share one source, are merged at assembly, and the annotation wins for the same injection point.
+**結論**: 機能し、マニフェストへの宣言は不要である。アノテーションとマニフェストは1つの源を共有し、アセンブリ時にマージされ、同じ注入ポイントではアノテーションが優先される。
 
-**Why no declaration is needed**: annotations are just the `CustomAttribute` table in metadata, and the loader already reads the same metadata when scanning mods (manifest, embedded resources, and AssemblyRef — three items), so reading one more table introduces no new loading or timing constraint. The only precondition is that the mod references `NetCraft.ModApi` (the annotations' host).
+**なぜ宣言が不要か**: アノテーションはメタデータ内の `CustomAttribute` テーブルにすぎず、ローダーはModのスキャン時にすでに同じメタデータ（マニフェスト、埋め込みリソース、AssemblyRef の3項目）を読んでいる。テーブルを1つ多く読んでも新たなロードやタイミングの制約は生じない。唯一の前提は、Modが `NetCraft.ModApi`（アノテーションのホスト）を参照していることである。
 
-**The premise is static reading**: reading annotations must go through `MetadataReader` and **must not use `Assembly.Load` + `GetCustomAttributes`** — the latter pulls up the mod assembly just to read rules, and the rewrite window is gone on the spot.
+**前提は静的読み取りである**: アノテーションの読み取りは `MetadataReader` を通さなければならず、**`Assembly.Load` + `GetCustomAttributes` を使ってはならない** — 後者はルールを読むためだけにModアセンブリを引き上げてしまい、その場で書き換えウィンドウが失われる。
 
-**`typeof` does not constitute a type reference**: what `typeof(X)` compiles into the parameter is the type's serialized name (`full name, assembly, Version=…`), which resolves to just a string and does not require `X` to be present. So writing `typeof(injected-mod)` in an annotation does **not** violate the constraint in 2.2 that "a replacement class must not reference the injected mod's types" — a name appearing in metadata and resolving a type at runtime are two different things.
+**`typeof` は型参照を構成しない**: `typeof(X)` がパラメータへコンパイルするのは型のシリアル化された名前（`full name, assembly, Version=…`）であり、これは単なる文字列に解決され、`X` の存在を要求しない。したがってアノテーションに `typeof(injected-mod)` と書いても、2.2 の「置換クラスは注入されるModの型を参照してはならない」という制約に**違反しない** — 名前がメタデータに現れることと、実行時に型を解決することは別物である。
 
-**Verification case**: `NetCraft.Test2` against two methods of `NetCraft.Test1`; `Greet` goes through the annotation and `Farewell` through the manifest. Both rules are installed and both call sites are replaced:
+**検証ケース**: `NetCraft.Test2` を `NetCraft.Test1` の2つのメソッドに対して。`Greet` はアノテーションを通り、`Farewell` はマニフェストを通る。両方のルールが設置され、両方の呼び出し箇所が置換される:
 
 ```
 Mod netcraft.test2 injects NetCraft.Test1!NetCraft.Test1.Test1Api::Greet replaced by NetCraft.Test2.Test2Probe::OnGreet [CallSite/ILRewrite]        ← annotation
@@ -785,72 +785,72 @@ Test2 internal greeting: Test1 original greeting test2     ← control group: th
 Test2 internal farewell: Test1 original farewell test2     ← control group
 ```
 
-The same case also incidentally verified that the annotation's named parameter (`Environment = "server"`) is resolved too.
+同じケースで、アノテーションの名前付きパラメータ（`Environment = "server"`）も解決されることが副次的に確認された。
 
-### 6.3 The performance cost of attaching the profiler
+### 6.3 プロファイラをアタッチする性能コスト
 
-**Scenario**: the same pure-computation program (a hundred million modulo-and-accumulate iterations), run once without the profiler and once with it attached (the three `CORECLR_ENABLE_PROFILING` environment variables). Five runs each.
+**シナリオ**: 同じ純粋計算プログラム（1億回の剰余と加算の反復）を、プロファイラなしで1回、アタッチあり（3つの `CORECLR_ENABLE_PROFILING` 環境変数）で1回実行する。各5回。
 
-**Conclusion**: no difference in steady state; the cost is entirely at startup.
+**結論**: 定常状態に差はなく、コストは完全に起動時にある。
 
-| | Total process time (5 runs, ms) | In-program computation time |
+| | プロセス総時間（5回、ms） | プログラム内の計算時間 |
 | --- | --- | --- |
-| without | 306 / 260 / 278 / 253 / 300 | 225 ms |
-| with | 406 / 370 / 340 / 325 / 354 | 193 ms |
+| なし | 306 / 260 / 278 / 253 / 300 | 225 ms |
+| あり | 406 / 370 / 340 / 325 / 354 | 193 ms |
 
-Total time is about 80–110 ms longer. The source is `COR_PRF_DISABLE_ALL_NGEN_IMAGES` — enabling ReJIT requires disabling ReadyToRun images at the same time, so framework code can only go through JIT; the timed loop inside the program is identical once JIT-compiled, showing no difference (the run with the profiler was actually slightly faster, which is noise).
+総時間は約80〜110ms長い。原因は `COR_PRF_DISABLE_ALL_NGEN_IMAGES` である — ReJITを有効にすると同時にReadyToRunイメージを無効化する必要があるため、フレームワークのコードはJITしか通れない。プログラム内の計測ループはJITコンパイル後は同一で、差は見られない（プロファイラありの実行の方が実際にはわずかに速く、これはノイズである）。
 
-**A waste also fixed along the way**: the initial implementation subscribed to `COR_PRF_MONITOR_JIT_COMPILATION`, a native callback fired after every method compiles, which we never used. After removing it the event mask changed from `0x80040024` to `0x80040004`; the table above is the data after removal.
+**ついでに直した無駄**: 初期の実装は `COR_PRF_MONITOR_JIT_COMPILATION` を購読していた。これはメソッドがコンパイルされるたびに発火するネイティブコールバックで、我々は一切使っていなかった。これを削除した後、イベントマスクは `0x80040024` から `0x80040004` に変わった。上の表は削除後のデータである。
 
-**Verification case**: `__hookverify/BenchProbe`.
+**検証ケース**: `__hookverify/BenchProbe`。
 
-### 6.4 Two mods injecting the same target
+### 6.4 2つのModが同じターゲットに注入する
 
-**Scenario**: two mods each declare a rule that hits the same target method (`MethodBody` form, different replacement methods).
+**シナリオ**: 2つのModがそれぞれ同じ対象メソッドに当たるルールを宣言する（`MethodBody` 形式、置換メソッドは異なる）。
 
-**Conclusion**: no error, no crash; **the first-assembled rule wins and the later one silently fails**.
+**結論**: エラーもクラッシュもない。**先に組み立てられたルールが勝ち、後からのものは黙って失敗する**。
 
-Both rules enter the rule table — no cross-mod deduplication is done. When rewriting, the **first** entry in the same-key list for `OriginalType::OriginalMethod` is taken; host scoping behaves the same way, with `InType`/`InMethod` being "the first match wins". Which is first depends on assembly order, and assembly order comes from the enumeration order of the mods directory; **there is no priority field and it cannot be controlled by declaring dependencies** (dependencies affect only the order of `Init()`, not the assembly of injection rules).
+両方のルールがルールテーブルに入る — Mod間の重複排除は行われない。書き換え時には、`OriginalType::OriginalMethod` の同一キーリストの**最初の**項目が取られる。ホストのスコープも同じように振る舞い、`InType`/`InMethod` は「最初にマッチしたものが勝つ」。どちらが最初かはアセンブリ順序に依存し、アセンブリ順序はmodsディレクトリの列挙順に由来する。**優先度フィールドはなく、依存関係を宣言しても制御できない**（依存関係が影響するのは `Init()` の順序だけで、注入ルールの組み立てではない）。
 
-**Runtime injection is first-come, first-served too**: a later registration request is sent normally, but `GetReJITParameters` claims by "module + method" and always matches the first request, so the later registration does not land. Measured after a second injection, the target method's behavior stays at the first result.
+**実行時注入も先着順である**: 後からの登録要求は通常どおり送られるが、`GetReJITParameters` は「モジュール + メソッド」で確保し、常に最初の要求にマッチするため、後からの登録は適用されない。2回目の注入後に計測しても、対象メソッドの挙動は最初の結果のままである。
 
-**One bad rule does not affect the others**: problems like the target type not being in any known assembly or a misspelled injection form are recorded in `ModHooks.Errors` at assembly time and that entry is skipped, while other mods' rules are assembled as usual.
+**1つの壊れたルールは他に影響しない**: 対象型がどの既知のアセンブリにもない、注入形式の綴りが間違っているといった問題はアセンブリ時に `ModHooks.Errors` に記録され、その項目はスキップされ、他のModのルールは通常どおり組み立てられる。
 
-**Conflicts are recorded**: when assembly detects the same injection point declared by multiple mods, the later-assembled one is written to `ModHooks.Warnings` and output in the startup log as `Mod injection conflict ...`, naming which two mods collided and which one will not take effect. It is a warning, not an error, does not affect loading, and the rule itself remains in the table (just unreachable).
+**競合は記録される**: アセンブリが同じ注入ポイントを複数のModが宣言しているのを検出すると、後に組み立てられたものが `ModHooks.Warnings` に書かれ、起動ログに `Mod injection conflict ...` として出力され、どの2つのModが衝突したか、どちらが効果を発揮しないかが示される。これは警告であってエラーではなく、ロードに影響せず、ルール自体はテーブルに残る（単に到達できないだけである）。
 
-**Runtime injection goes through this check too**: the conflict detection key includes `patchMode`, so one mod writing `ILRewrite` and another writing `RuntimeInject` does not count as a collision (two independent paths, each doing its own thing); only two of the same mode are judged conflicting and warned. Its actual landing is likewise first-come, first-served — `GetReJITParameters` claims by "module + method", matching the first request, so later ones are sent but do not land.
+**実行時注入もこのチェックを通る**: 競合検出キーは `patchMode` を含むため、あるModが `ILRewrite` を、別のModが `RuntimeInject` を書いても衝突とはみなされない（2つの独立した経路がそれぞれ動く）。同じモードの2つだけが競合と判定され警告される。その実際の適用も同様に先着順である — `GetReJITParameters` は「モジュール + メソッド」で確保し最初の要求にマッチするため、後からのものは送られても適用されない。
 
-**The one hard crash point**: when two mods both patch the same method in `RuntimePatch` mode, the second hits `RuntimeHookEngine`'s duplicate-registration check and throws `InvalidOperationException`, and this path is not caught, so startup fails outright. `RuntimePatch` is on its way out (see [2.6](#26-runtime-injection-modifying-already-running-code)); do not use it in new rules.
+**唯一のハードクラッシュ点**: 2つのModが同じメソッドを `RuntimePatch` モードでパッチすると、2つ目が `RuntimeHookEngine` の重複登録チェックに引っかかり `InvalidOperationException` を投げ、この経路は捕捉されないため起動が完全に失敗する。`RuntimePatch` は廃止方向にある（[2.6](#26-実行時注入すでに実行中のコードを変更する) 参照）。新しいルールでは使わないこと。
 
-**Verification case**: the `modinjection` module of `NetCraft.Test`, entries `same anchor first mod wins quietly` and `one bad rule does not sink the rest`.
+**検証ケース**: `NetCraft.Test` の `modinjection` モジュール、項目 `same anchor first mod wins quietly` と `one bad rule does not sink the rest`。
 
-### 6.5 Not yet verified
+### 6.5 未検証
 
-- **Runtime injection working on a real server**: `RuntimeInject` mode has been verified end-to-end in `__hookverify/RuntimeProbe` (after registration the target method's behavior is swapped to the replacement's), and the mod assembly side also has test coverage for routing and downgrade; but no build step currently places `lead_hook_native` into NC's run directory, so running this chain on a real server requires first putting the library in the program root (or pointing to it with `NC_PROFILER_PATH`). This step is not done.
-- **A replacement class referencing the injected mod's types**: by reasoning, at the moment of rewriting a it would resolve a, while a is stuck just before load completion (it is not yet in `Default`, and neither `ModLibs` nor the kernel resolution callback recognizes mod assemblies), so `PrepareMod` is expected to throw and record into `result.Errors`. Not yet actually run. Note 6.2 only proves that **`typeof` in an annotation** is not a reference; **the type appearing in a method signature** is another matter.
+- **実サーバでの実行時注入の動作**: `RuntimeInject` モードは `__hookverify/RuntimeProbe` でエンドツーエンドに検証済みである（登録後、対象メソッドの挙動が置換先のものに差し替わる）。Modアセンブリ側にもルーティングと降格のテストカバレッジがある。しかし現在、`lead_hook_native` をNCの実行ディレクトリに置くビルドステップがないため、この連鎖を実サーバで動かすにはまずライブラリをプログラムルートに置く（または `NC_PROFILER_PATH` で指す）必要がある。このステップは未実施である。
+- **置換クラスが注入されるModの型を参照する場合**: 推論では、aを書き換える瞬間にaを解決しようとするが、aはロード完了の直前に留まっている（まだ `Default` におらず、`ModLibs` もカーネルの解決コールバックもModアセンブリを認識しない）。そのため `PrepareMod` は例外を投げ `result.Errors` に記録されると予想される。まだ実際には実行していない。6.2 は**アノテーション内の `typeof`** が参照でないことを証明するだけである。**メソッドシグネチャに現れる型**は別の話である。
 
 ---
 
-## Appendix: HookType overview
+## 付録：HookType の概要
 
-| Form | Effect | Requirement on the replacement method signature |
+| 形式 | 効果 | 置換メソッドのシグネチャへの要件 |
 | --- | --- | --- |
-| `CallSite` | replace call sites to the target method with your method | parameter count matches the called method (instance call +1) |
-| `MethodBody` | replace the entire target method body | matches the replaced method |
-| `NewObj` | replace `new X(...)` | parameter count matches the constructor |
-| `FieldRead` | instrument field reads | by the read type |
-| `FieldWrite` | instrument field writes | by the write type |
-| `TypeCheck` | instrument `isinst` / `castclass` | by the checked type |
-| `Box` | instrument boxing/unboxing | by the element type |
-| `FunctionPointer` | instrument function pointer loads | by the delegate type |
-| `LocalRead` | instrument local variable reads | zero parameters, returns the variable's value |
-| `LocalWrite` | instrument local variable writes | one parameter, receives the written value |
-| `Constant` | instrument constant loads | zero parameters, returns the constant's value |
-| `Probe` | keep the original method body, instrumenting the entry and every exit; with `LabelArgumentIndex`, one argument can be folded into the label | `Begin()` returns long, `End(string, long)` |
-| `Mark` | report once at method entry only, without timing | `void method(string label)` |
+| `CallSite` | 対象メソッドへの呼び出し箇所を自分のメソッドに置き換える | パラメータ数が呼び出されるメソッドと一致する（インスタンス呼び出しは +1） |
+| `MethodBody` | 対象メソッド本体全体を置き換える | 置換されるメソッドと一致する |
+| `NewObj` | `new X(...)` を置き換える | パラメータ数がコンストラクタと一致する |
+| `FieldRead` | フィールドの読み取りを計測する | 読み取る型による |
+| `FieldWrite` | フィールドの書き込みを計測する | 書き込む型による |
+| `TypeCheck` | `isinst` / `castclass` を計測する | チェックされる型による |
+| `Box` | ボックス化/ボックス解除を計測する | 要素の型による |
+| `FunctionPointer` | 関数ポインタのロードを計測する | デリゲートの型による |
+| `LocalRead` | ローカル変数の読み取りを計測する | パラメータなし、その変数の値を返す |
+| `LocalWrite` | ローカル変数の書き込みを計測する | パラメータ1つ、書き込まれる値を受け取る |
+| `Constant` | 定数のロードを計測する | パラメータなし、その定数の値を返す |
+| `Probe` | 元のメソッド本体を保ち、入口とすべての出口を計測する。`LabelArgumentIndex` を使うと、引数を1つラベルに畳み込める | `Begin()` は long を返し、`End(string, long)` |
+| `Mark` | メソッド入口でのみ1回報告し、計時はしない | `void method(string label)` |
 
-`Probe` and `Mark` pass only the label text (`Probe` can also include one argument's `ToString()`); they cannot obtain object references. To get actual arguments, use `CallSite`.
+`Probe` と `Mark` はラベルテキストのみを渡す（`Probe` は引数1つの `ToString()` も含められる）。オブジェクト参照は取得できない。実際の引数を得るには `CallSite` を使う。
 
-`InType`/`InMethod`, `Placement`, and `Ordinal` (see [2.4](#24-narrowing-to-one-site-host-scoping-and-placement)) are meaningful only for instruction-level forms: the ten entries in the table above other than `MethodBody`, `Probe`, and `Mark` can choose replace or insert-before/after, and can use `Ordinal` to pick a single occurrence; `MethodBody` always replaces the whole thing, and `Probe`/`Mark` ignore these parameters.
+`InType`/`InMethod`、`Placement`、`Ordinal`（[2.4](#24-1箇所への絞り込みホストのスコープと配置) 参照）は命令レベルの形式にのみ意味がある: 上の表のうち `MethodBody`、`Probe`、`Mark` 以外の10項目は置換か前/後への挿入を選べ、`Ordinal` で1回の出現を選べる。`MethodBody` は常に全体を置換し、`Probe`/`Mark` はこれらのパラメータを無視する。
 
-For the three kinds `LocalRead` / `LocalWrite` / `Constant`, the host method is written in `target` rather than a referenced entity, and `localIndex` or `constantValue` is additionally required; see [2.5](#25-in-method-body-anchors-local-variables-and-constants).
+`LocalRead` / `LocalWrite` / `Constant` の3種では、ホストメソッドは参照される実体ではなく `target` に書かれ、加えて `localIndex` または `constantValue` が必要である。[2.5](#25-メソッド本体内のアンカーローカル変数と定数) 参照。

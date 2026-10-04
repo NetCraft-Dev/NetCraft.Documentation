@@ -1,46 +1,46 @@
-# NetCraft mod template
+# NetCraft Modテンプレート
 
-Sample code for NetCraft mod development. Every entry in `NetCraftTemplate.yaml`
-points at one file under `examples/`, and `ncm template` pulls them on demand.
+NetCraft Mod開発用のサンプルコード。`NetCraftTemplate.yaml` の各エントリは
+`examples/` 配下の1ファイルを指し、`ncm template` がオンデマンドで取得する。
 
-## Usage
+## 使い方
 
 ```
-ncm template view              list every entry
-ncm template view Wrapper.?    filter by id, ? and * are wildcards
-ncm template example <api id>  pull one example file into the current directory
+ncm template view              すべてのエントリを一覧表示
+ncm template view Wrapper.?    idでフィルタ、? と * はワイルドカード
+ncm template example <api id>  1つのサンプルファイルをカレントディレクトリに取得
 ```
 
-## The two routes
+## 2つのルート
 
-`NetCraft.ModApi` exposes two namespaces, pick the one that fits:
+`NetCraft.ModApi` は2つの名前空間を公開する。用途に合う方を選ぶ:
 
-| Namespace | What you get |
+| 名前空間 | 得られるもの |
 | --- | --- |
-| `NetCraft.ModApi.Wrapper` | Events, `Nc*` facades and `Nc*` handles. No kernel type shows up in the public surface, so a kernel rename does not force a rebuild of your mod. |
-| `NetCraft.ModApi.Extension` | `[Inject]` and `[Mixin]` attributes. Rules name kernel types and methods directly, which is more powerful and more fragile. |
+| `NetCraft.ModApi.Wrapper` | イベント、`Nc*` ファサード、`Nc*` ハンドル。公開サーフェスにカーネル型が現れないため、カーネルのリネームでModの再ビルドを強いられない。 |
+| `NetCraft.ModApi.Extension` | `[Inject]` と `[Mixin]` 属性。ルールがカーネルの型とメソッドを直接指すため、より強力で、より壊れやすい。 |
 
-## Common calls
+## よく使う呼び出し
 
-Open this panel from inside a mod project and every call below that your code
-actually uses is graded against `NetCraftTemplate.yaml`: green when the member
-is declared, amber when the member is not, red when the type is not declared
-at all. Hover a highlighted name to see the reason.
+Modプロジェクト内からこのパネルを開くと、以下の各呼び出しのうちコードが
+実際に使用しているものが `NetCraftTemplate.yaml` と照合され評価される:
+メンバーが宣言されていれば緑、メンバーがなければ黄、型自体が宣言されて
+いなければ赤。ハイライトされた名前をホバーすると理由が表示される。
 
-| Call | What it does |
+| 呼び出し | 動作 |
 | --- | --- |
-| `NcServer.IsAvailable` | whether the server is up and captured |
-| `NcServer.Broadcast` | system message to everyone online |
-| `NcServer.Execute` | run a command as the console |
-| `NcWorld.GetBlock` | read one block, null when the chunk is unloaded |
-| `NcWorld.SetBlock` | write one block, runs the full update chain |
-| `NcWorld.BreakBlock` | break a block the way a player would |
-| `NcPlayer.Name` | the player name |
-| `NcPlayer.Health` | current health |
-| `NcPlayers.Find` | look up an online player by name |
-| `NcPlayers.Send` | private system message |
-| `NcRegistries.FindState` | block state by namespaced id |
-| `NcRegistries.FindItem` | item by namespaced id |
-| `ServerEvents.Tick` | runs every server tick |
-| `ServerEvents.PlayerJoin` | a player finished joining |
-| `ServerEvents.BlockBroken` | a block was actually replaced |
+| `NcServer.IsAvailable` | サーバが起動し捕捉されているか |
+| `NcServer.Broadcast` | オンライン全員へのシステムメッセージ |
+| `NcServer.Execute` | コンソールとしてコマンドを実行 |
+| `NcWorld.GetBlock` | ブロックを1つ読み取る。チャンク未ロード時はnull |
+| `NcWorld.SetBlock` | ブロックを1つ書き込む。更新チェーン全体を実行 |
+| `NcWorld.BreakBlock` | プレイヤーと同様にブロックを破壊 |
+| `NcPlayer.Name` | プレイヤー名 |
+| `NcPlayer.Health` | 現在の体力 |
+| `NcPlayers.Find` | 名前でオンラインプレイヤーを検索 |
+| `NcPlayers.Send` | 個人向けシステムメッセージ |
+| `NcRegistries.FindState` | 名前空間付きidでブロック状態を取得 |
+| `NcRegistries.FindItem` | 名前空間付きidでアイテムを取得 |
+| `ServerEvents.Tick` | サーバtickごとに実行 |
+| `ServerEvents.PlayerJoin` | プレイヤーの参加が完了 |
+| `ServerEvents.BlockBroken` | ブロックが実際に置き換えられた |
