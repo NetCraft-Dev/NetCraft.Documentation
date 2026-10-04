@@ -1,105 +1,105 @@
-# NetCraft Modding Guide
+# NetCraft 模组开发指南
 
 
-Details for individual APIs are not here; see [mod-api.md](mod-api.md).
+单个 API 的细节不在这里；见 [mod-api-zh.md](modapi-zh.md)。
 
 ---
 
-## 1. Runtime structure first
+## 1. 先看运行时结构
 
-### 1.1 Three process entry points
+### 1.1 三个进程入口
 
-NC has three entry points, and the mod injection pipeline is the same for all three:
+NC 有三个入口点，三者的模组注入流水线完全相同：
 
-| Entry | Purpose |
+| 入口 | 用途 |
 | --- | --- |
-| `NetCraft.Loader` | one exe for both sides: `--server` starts the server; `--client` or no mode flag starts the client |
-| `NetCraft.Server.Exe` | standalone server executable |
-| `NetCraft.Client.Exe` | standalone client executable |
+| `NetCraft.Loader` | 一个 exe 兼顾两侧：`--server` 启动服务端；`--client` 或不带模式参数启动客户端 |
+| `NetCraft.Server.Exe` | 独立的服务端可执行文件 |
+| `NetCraft.Client.Exe` | 独立的客户端可执行文件 |
 
-`Main` itself is a thin shell that only registers callbacks and hands the work to the next method. Take `NetCraft.Server.Exe`:
+`Main` 本身只是一层薄壳，只注册回调并把工作交给下一个方法。以 `NetCraft.Server.Exe` 为例：
 
 ```csharp
 public static int Main(string[] args)
 {
-    EmbeddedAssemblyLoader.Initialize();   // register the kernel assembly resolution callback
-    BootMods(args);                        // run the mod bootstrap
-    return Launch(args);                   // only now enter the business implementation
+    EmbeddedAssemblyLoader.Initialize();   // 注册内核程序集解析回调
+    BootMods(args);                        // 运行模组引导
+    return Launch(args);                   // 到这里才进入业务实现
 }
 ```
 
-This separation is not a matter of style. When the JIT compiles a method it resolves **all types** appearing in that method body, and this happens before the method executes. If `Main` called `ServerMain.Run(args)` directly, `NetCraft.Server.dll` would be pulled up the instant `Main` is JIT-compiled, before the mod bootstrap has run, and the rewrite window would be gone. So both `BootMods` and `Launch` must be marked `MethodImplOptions.NoInlining` — without the marker the JIT inlines them back into `Main`, defeating the split.
+这种分离不是风格问题。JIT 编译一个方法时会解析该方法体中出现的**所有类型**，且这发生在方法执行之前。如果 `Main` 直接调用 `ServerMain.Run(args)`，`NetCraft.Server.dll` 会在 `Main` 被 JIT 编译的瞬间就被拉起，早于模组引导运行，改写窗口就没了。所以 `BootMods` 和 `Launch` 都必须标注 `MethodImplOptions.NoInlining` —— 没有这个标注，JIT 会把它们内联回 `Main`，拆分的意义就没了。
 
-`NetCraft.Loader` has the same structure, except its mode detection and mod bootstrap are both in `Launch`, and `Main` keeps only the two steps `Initialize` and `Launch`.
+`NetCraft.Loader` 结构相同，只是它的模式检测和模组引导都在 `Launch` 里，`Main` 只保留 `Initialize` 和 `Launch` 两步。
 
-### 1.2 Kernel assemblies in the kernel/ subdirectory
+### 1.2 内核程序集放在 kernel/ 子目录
 
-The output directory after a build looks like this:
+构建后的输出目录长这样：
 
 ```
 NetCraft.Server.Exe.exe
-NetCraft.dll              <- main library, embeds all lower-level sub-libraries
-NetCraft.ModLoader.dll    <- the loader itself
-NetCraft.Server.Exe.dll   <- entry assembly
+NetCraft.dll              <- 主库，内嵌所有更低层的子库
+NetCraft.ModLoader.dll    <- 加载器本身
+NetCraft.Server.Exe.dll   <- 入口程序集
 kernel/
   NetCraft.Game.dll
   NetCraft.Server.dll
-  ... remaining kernel assemblies
+  ... 其余内核程序集
 mods/
   your-mod.dll
 ```
 
-Why move them into `kernel/` instead of leaving them in the root?
+为什么把它们挪进 `kernel/` 而不是留在根目录？
 
-The .NET host treats assemblies registered in `deps.json` as TPA (Trusted Platform Assemblies). For assemblies in the TPA, the runtime resolves **by path** — bytes passed to `AssemblyLoadContext.LoadFromStream` are simply ignored. That is, even if we feed in rewritten bytes ahead of time, the runtime still reads the unrewritten copy from disk. Only by removing the kernel assemblies from `deps.json` and moving the files away does the runtime call back into `AssemblyLoadContext.Resolving` on resolution failure, giving us the chance to hand over the rewritten bytes.
+.NET 宿主把 `deps.json` 中注册的程序集视为 TPA（Trusted Platform Assemblies，受信任平台程序集）。对于 TPA 中的程序集，运行时**按路径**解析 —— 传给 `AssemblyLoadContext.LoadFromStream` 的字节会被直接忽略。也就是说，即便我们提前喂入改写后的字节，运行时仍会从磁盘读取未改写的那份。只有把内核程序集从 `deps.json` 中移除并把文件挪走，运行时才会在解析失败时回调 `AssemblyLoadContext.Resolving`，我们才有机会交出自改写后的字节。
 
-The three kinds left in the root cannot be moved: the main library (it is the embedding host and must start first), the loader itself (the bootstrap code lives in it), and the entry assembly (the apphost starts from it).
+留在根目录的三类不能挪：主库（它是内嵌宿主，必须最先启动）、加载器本身（引导代码住在里面）、入口程序集（apphost 从它启动）。
 
-**Cost**: the entry assembly itself cannot be injected into. If your hook target happens to live in the `NetCraft.Server.Exe.dll` assembly, it is ineffective. Kernel business code is all under `kernel/`, so normally this is not a problem.
+**代价**：入口程序集本身无法被注入。如果你的注入目标恰好住在 `NetCraft.Server.Exe.dll` 程序集里，那它不会生效。内核业务代码全在 `kernel/` 下，所以通常不是问题。
 
-### 1.3 Mod loading sequence
+### 1.3 模组加载顺序
 
 ```
 EmbeddedAssemblyLoader.Initialize()
-  └─ install the Resolving callback
-BootMods → ModBootstrap.Run(current side)
-  ├─ statically scan mods/*.dll (MetadataReader reads embedded ncmod.json, no assembly is loaded)
-  ├─ filter out mods whose environment does not match the current side
-  ├─ assemble injection rules and hand the rewriter to the main library
-  ├─ preload target assemblies: read bytes → run through rewriter → LoadFromStream
-  └─ call each mod entry's Init()
+  └─ 安装 Resolving 回调
+BootMods → ModBootstrap.Run(当前侧)
+  ├─ 静态扫描 mods/*.dll（MetadataReader 读取内嵌的 ncmod.json，不加载任何程序集）
+  ├─ 过滤掉 environment 与当前侧不匹配的模组
+  ├─ 汇总注入规则并把改写器交给主库
+  ├─ 预加载目标程序集：读取字节 → 过改写器 → LoadFromStream
+  └─ 调用每个模组入口的 Init()
 Launch → ServerMain/ClientMain.Run(args)
-  └─ kernel business starts running; the probes are already inside
+  └─ 内核业务开始运行；探针已经在里面了
 ```
 
-Note the order: **declarations are scanned, rewritten bytes are loaded, and entry code runs last**. By the time a mod's `Init()` executes, the kernel assemblies have already been replaced.
+注意顺序：**先扫描声明，再加载改写后的字节，入口代码最后运行**。等模组的 `Init()` 执行时，内核程序集已经被替换完毕。
 
 ---
 
-## 2. Key differences from Fabric
+## 2. 与 Fabric 的关键差异
 
-| Dimension | Fabric | NetCraft |
+| 维度 | Fabric | NetCraft |
 | --- | --- | --- |
-| Language / runtime | Java / JVM | C# / .NET 10 (CoreCLR) |
-| Mod carrier | jar containing `fabric.mod.json` | dll embedding `ncmod.json` |
-| Declaration reading | read a file inside the jar | `MetadataReader` statically reads embedded resources without loading assemblies |
-| Code injection | Mixin (annotations in source; members are mixed into the target class at class load) | `Lead.Hook` (rules declared in a manifest or annotations; bytes are rewritten in place during assembly resolution) |
-| Injection granularity | any line in a method body, including locals and intermediate expression values | thirteen forms (call site, field read/write, constructor, type check, boxing, local variable, constant, whole-method-body replacement, probes, etc.), with insert-before or insert-after |
-| Loading model | Fabric Loader + Knot class loader | single default ALC + `AssemblyLoadContext.Resolving` |
-| Official API scope | Fabric API has a great many modules | NetCraft-ModApi currently has only event and command extension points |
+| 语言 / 运行时 | Java / JVM | C# / .NET 10 (CoreCLR) |
+| 模组载体 | 包含 `fabric.mod.json` 的 jar | 内嵌 `ncmod.json` 的 dll |
+| 声明读取 | 读取 jar 内的一个文件 | `MetadataReader` 静态读取嵌入资源，不加载程序集 |
+| 代码注入 | Mixin（源码中的注解；成员在类加载时混入目标类） | `Lead.Hook`（规则在清单或注解中声明；字节在程序集解析期间就地改写） |
+| 注入粒度 | 方法体中的任意一行，包括局部变量和中间表达式值 | 十三种形式（调用点、字段读/写、构造、类型检查、装箱、局部变量、常量、整方法体替换、探针等），并支持前插或后插 |
+| 加载模型 | Fabric Loader + Knot 类加载器 | 单一默认 ALC + `AssemblyLoadContext.Resolving` |
+| 官方 API 范围 | Fabric API 有非常多模块 | NetCraft-ModApi 目前只有事件和命令扩展点 |
 
-### 2.1 Injection styles: annotations or manifest, pick one
+### 2.1 注入风格：注解或清单，二选一
 
-Fabric's Mixin is annotated **in source**:
+Fabric 的 Mixin 是**在源码中**注解的：
 
 ```java
 @Inject(method = "tick", at = @At("HEAD"))
 private void onTick(CallbackInfo ci) { ... }
 ```
 
-NC supports both styles, but their prerequisites differ: the annotation form relies on `InjectAttribute` in `NetCraft.ModApi.Extension`, so a mod that does not reference it cannot use annotations; the manifest form is pure data written in `ncmod.json` and requires no reference for injection rules.
+NC 两种风格都支持，但前提不同：注解形式依赖 `NetCraft.ModApi.Extension` 中的 `InjectAttribute`，所以不引用它的模组用不了注解；清单形式是写在 `ncmod.json` 里的纯数据，注入规则不需要任何引用。
 
-**Annotation**, placed on your own replacement method:
+**注解**，写在你自己的替换方法上：
 
 ```csharp
 [Inject(typeof(DedicatedServer), nameof(DedicatedServer.Tick),
@@ -107,7 +107,7 @@ NC supports both styles, but their prerequisites differ: the annotation form rel
 public static void OnTick(object self) { ... }
 ```
 
-**Manifest**, written in `hooks` in `ncmod.json`:
+**清单**，写在 `ncmod.json` 的 `hooks` 中：
 
 ```json
 {
@@ -121,41 +121,41 @@ public static void OnTick(object self) { ... }
 }
 ```
 
-During assembly the two routes merge into one rule table, and **if the same injection point is written in both, the annotation wins**. After merging they are indistinguishable; the difference is in prerequisites and ergonomics:
+组装时两条路线合并成一张规则表，**如果同一个注入点两边都写了，注解胜出**。合并之后二者无法区分；差别在于前提和易用性：
 
-| | Annotation | Manifest |
+| | 注解 | 清单 |
 | --- | --- | --- |
-| Where it is written | on the replacement method | in `hooks` in `ncmod.json` |
-| Prerequisite | must reference `NetCraft.ModApi` | none, pure data |
-| Type names | `typeof` / `nameof`, checked by the compiler | hand-written strings; typos are only found during assembly |
-| What it can carry | injection rules only | mod identity (id, entry, environment, display info) and injection rules |
+| 写在哪里 | 替换方法上 | `ncmod.json` 的 `hooks` 中 |
+| 前提 | 必须引用 `NetCraft.ModApi` | 无，纯数据 |
+| 类型名 | `typeof` / `nameof`，由编译器检查 | 手写字符串；拼错要到组装时才发现 |
+| 能携带什么 | 只有注入规则 | 模组身份（id、entry、environment、显示信息）和注入规则 |
 
-So `ncmod.json` must be written whether or not you use annotations; it is the sole source of mod identity. Annotations only make rules less error-prone to write. The manifest has no dependency field; dependency relationships are inferred from assembly references (see 6.1) and need no declaration.
+所以无论你用不用注解，`ncmod.json` 都必须写；它是模组身份的唯一来源。注解只是让规则写起来更不容易出错。清单没有依赖字段；依赖关系从程序集引用推断（见 6.1），无需声明。
 
-Conversely, **a mod that does not reference `NetCraft.ModApi` can only use the manifest** — this affects more than injection rules: events like `ServerEvents` and the `Nc*` facades are also in ModApi (under `NetCraft.ModApi.Wrapper`, see [3.3](#33-a-side-by-side-example)), so a mod that cannot use annotations also cannot use them.
+反过来说，**不引用 `NetCraft.ModApi` 的模组只能用清单** —— 这影响的不只是注入规则：像 `ServerEvents` 这样的事件和 `Nc*` 门面也在 ModApi 中（在 `NetCraft.ModApi.Wrapper` 下，见 [3.3](#33-一个对照示例)），所以用不了注解的模组也用不了它们。
 
-The differences from Fabric remain:
+与 Fabric 的差异依然存在：
 
-- **How and when changes happen**: Mixin has a transformer **mix members of the mixin class into** the target class at **class load**, so what gets loaded is a synthesized new class and the original no longer exists; NC rewrites the target method's instructions in place **before the assembly enters memory**, so the class is still the same class, only its method body changes. Both rewrite at load time, neither modifies bytecode at compile time — Mixin's annotation processor only generates a refmap (obfuscation mapping) and performs validation at build time, while NC is not obfuscated and has no such layer at all.
-- Mixin can inject at **any position in the middle of a method body**; NC can target a specific call site, field access, construction, local variable read/write, or constant within a specified host method, and can insert before or after it (`InType`/`InMethod` narrow the scope, `Placement` decides insert or replace), but it **cannot reach an arbitrary line number** and cannot change a jump target or an intermediate expression value on the stack.
-- Mixin targets use a string method name plus descriptor; NC uses "full type name + method name", so same-name overloads all match, and precision to a single one requires `InType`/`InMethod`.
+- **改变的方式和时机**：Mixin 有一个转换器，在**类加载**时把 mixin 类的成员**混入**目标类，所以加载进来的是一个合成的新类，原来的类不复存在；NC 则在**程序集进入内存之前**就地改写目标方法的指令，类还是同一个类，只是方法体变了。二者都在加载时改写，都不在编译期修改字节码 —— Mixin 的注解处理器只在构建时生成 refmap（混淆映射）并做校验，而 NC 不做混淆，根本没有这一层。
+- Mixin 可以注入到**方法体中间的任意位置**；NC 可以在指定宿主方法内瞄准特定的调用点、字段访问、构造、局部变量读/写或常量，并能前插或后插（`InType`/`InMethod` 收窄范围，`Placement` 决定插入还是替换），但**无法触及任意行号**，也无法改变跳转目标或栈上的中间表达式值。
+- Mixin 的目标用字符串方法名加描述符；NC 用「完整类型名 + 方法名」，所以同名重载全部匹配，要精确到某一个需要 `InType`/`InMethod`。
 
-**Which layer handles annotations**: the annotation type (`InjectAttribute`) is provided by `NetCraft.ModApi.Extension`, and it is resolved by `NetCraft.ModLoader` — when scanning mods it statically reads the `CustomAttribute` table with `MetadataReader`, without loading assemblies. **`Lead.Hook` does not recognize annotations**; it only sees the merged rule table, and the native injection layer recognizes only the description bytes compiled on the managed side, not even reading `ncmod.json`.
+**注解由哪一层处理**：注解类型（`InjectAttribute`）由 `NetCraft.ModApi.Extension` 提供，由 `NetCraft.ModLoader` 解析 —— 扫描模组时它用 `MetadataReader` 静态读取 `CustomAttribute` 表，不加载程序集。**`Lead.Hook` 不认注解**；它只看合并后的规则表，而原生注入层只认托管侧编译出的描述字节，连 `ncmod.json` 都不读。
 
-This determines what annotations can express: what you can write depends entirely on which fields `InjectAttribute` has. Currently there are seven — target type, method name, `HookType`, `Label`, `Environment`, `PatchMode`, `Ordinal` — and `InType`/`InMethod`/`Placement` from [2.4](#24-narrowing-to-one-site-host-scoping-and-placement) and `LocalIndex`/`ConstantValue` from [2.5](#25-in-method-body-anchors-local-variables-and-constants) **cannot be written in annotations**; use the C# API or wait for the manifest to catch up. The manifest side is missing these too — the only thing it accepts beyond annotations is `ordinal`.
+这决定了注解能表达什么：你能写什么完全取决于 `InjectAttribute` 有哪些字段。目前有七个 —— 目标类型、方法名、`HookType`、`Label`、`Environment`、`PatchMode`、`Ordinal` —— 而 [2.4](#24-收窄到一个位置宿主限定与放置) 中的 `InType`/`InMethod`/`Placement` 以及 [2.5](#25-方法体内部锚点局部变量与常量) 中的 `LocalIndex`/`ConstantValue` **无法写进注解**；要用 C# API，或者等清单跟上。清单这边也缺这些 —— 它超出注解能接受的只有 `ordinal`。
 
-For the thirteen injection forms see the [modding-guide appendix](#appendix-hooktype-overview) and [mod-api.md](mod-api.md).
+十三种注入形式见[本指南附录](#附录hooktype-一览)和 [mod-api-zh.md](modapi-zh.md)。
 
-### 2.2 An important constraint: probe classes must not carry kernel types in signatures
+### 2.2 一条重要约束：探针类的签名不能带内核类型
 
-NC rewriting happens **before** the kernel assemblies are loaded. When assembling rules, `Lead.Hook` uses reflection to find your replacement method and build a method reference, and this process resolves every parameter type and return type in the signature.
+NC 的改写发生在内核程序集加载**之前**。组装规则时，`Lead.Hook` 用反射找到你的替换方法并构建方法引用，这个过程会解析签名中的每一个参数类型和返回类型。
 
-Therefore: **a replacement method's signature may only use BCL types and `object`**. Once a `NetCraft.*` type appears in the signature, resolving it pulls up the kernel assemblies early and injection fails outright.
+因此：**替换方法的签名只能使用 BCL 类型和 `object`**。一旦签名中出现 `NetCraft.*` 类型，解析它就会提前拉起内核程序集，注入直接失败。
 
-When you need a kernel object, declare the parameter as `object` and cast inside the method body:
+当你需要内核对象时，把参数声明为 `object`，在方法体内转换：
 
 ```csharp
-//assembly only sees object; the method body is JIT-compiled after the kernel starts
+//程序集只看到 object；方法体在内核启动后才 JIT 编译
 public static void OnCommandsReady(object dispatcher)
 {
     var typed = (CommandDispatcher<CommandSourceStack>)dispatcher;
@@ -163,119 +163,119 @@ public static void OnCommandsReady(object dispatcher)
 }
 ```
 
-### 2.3 CallSite is replacement, not insertion
+### 2.3 CallSite 是替换不是插入
 
-A `CallSite` rule's replacement method **replaces** the original call, so the original method is not executed. To preserve the original behavior you must restore it yourself in the replacement method:
+`CallSite` 规则的替换方法**替换**原调用，所以原方法不会被执行。要保留原行为，你必须在替换方法里自己恢复：
 
 ```csharp
 public static void OnCommandsReady(object dispatcher)
 {
     var typed = (CommandDispatcher<CommandSourceStack>)dispatcher;
-    EffectCommand.Register(typed);              // restore the replaced call
-    ServerEvents.CommandRegister.Publish(...);  // then add the mod's own logic
+    EffectCommand.Register(typed);              // 恢复被替换的调用
+    ServerEvents.CommandRegister.Publish(...);  // 再加上模组自己的逻辑
 }
 ```
 
-Miss this step and the original functionality disappears entirely.
+漏掉这一步，原功能就彻底消失了。
 
-A few details about carrying this out:
+执行时的几个细节：
 
-- **`this` on an instance method counts as a parameter too**. Whether the target method is an instance method determines whether the replacement method needs an extra leading parameter. In IL both `call` and `callvirt` count as instance calls — for a non-virtual method on a `sealed` type the compiler emits `call`.
-- **One rule key covers all overloads under that class name**; overloads with the same parameter count share one replacement method. `Disconnect(string)` and `Disconnect(Component)` share this way, and the replacement method dispatches by the real argument type.
-- **A private method cannot be called from outside**, so the replacement method cannot restore the original call. Either give up this hook point or call it once via reflection (acceptable at low frequency).
-- **Value-type parameters and return values cannot be declared as `object`**, `object` is a reference on the stack while `float`/`bool` are values, and a mismatch is invalid IL. Keep these two positions as their real types.
-- **Unicast callbacks cannot be assigned directly**. Some kernel callback properties (e.g., the three chunk callbacks on `ServerChunkCache`) are `Action<T>` rather than `event`, and the kernel already occupies them. A mod assigning directly overrides the kernel's copy with no error at all. The correct approach is to hook the property's setter and, at the moment of assignment, chain your logic and the kernel callback into one wrapper delegate.
+- **实例方法上的 `this` 也算一个参数**。目标方法是否为实例方法，决定了替换方法是否需要多一个前导参数。在 IL 中 `call` 和 `callvirt` 都算实例调用 —— 对于 `sealed` 类型上的非虚方法，编译器生成 `call`。
+- **一个规则键覆盖该类名下的所有重载**；参数个数相同的重载共用一个替换方法。`Disconnect(string)` 和 `Disconnect(Component)` 就是这样共用的，替换方法按真实参数类型分发。
+- **私有方法无法从外部调用**，所以替换方法不能恢复原调用。要么放弃这个注入点，要么用反射调用一次（低频时可接受）。
+- **值类型参数和返回值不能声明为 `object`**，`object` 在栈上是引用而 `float`/`bool` 是值，不匹配就是非法 IL。这两个位置要保留它们的真实类型。
+- **单播回调不能直接赋值**。有些内核回调属性（例如 `ServerChunkCache` 上的三个区块回调）是 `Action<T>` 而不是 `event`，且内核已经占用了它们。模组直接赋值会覆盖内核的那份，而且毫无报错。正确做法是注入该属性的 setter，在赋值那一刻把你的逻辑和内核回调串成一个包装委托。
 
-### 2.4 Narrowing to one site: host scoping and placement
+### 2.4 收窄到一个位置：宿主限定与放置
 
-An instruction-level rule's default scope is **the entire assembly** — every place that calls the target method or reads/writes the target field matches. To narrow to one site, use two optional parameters:
+指令级规则的默认范围是**整个程序集** —— 每一个调用目标方法、读写目标字段的地方都会匹配。要收窄到一个位置，用两个可选参数：
 
-| Parameter | Effect |
+| 参数 | 作用 |
 | --- | --- |
-| `InType` / `InMethod` | match anchors only inside the specified host method body; both empty means unrestricted |
-| `Placement` | `Replace` replaces the anchor (default); `Before` / `After` keep the anchor and insert one call before or after it |
-| `Ordinal` | when the same anchor matches multiple places in the host method, pick which one, 0-based. Omitted means every place is modified |
+| `InType` / `InMethod` | 只在指定的宿主方法体内匹配锚点；两者都为空表示不限 |
+| `Placement` | `Replace` 替换锚点（默认）；`Before` / `After` 保留锚点，在它前面或后面插入一个调用 |
+| `Ordinal` | 同一个锚点在宿主方法中匹配到多处时，选择哪一处，从 0 开始。省略表示每一处都改 |
 
 ```csharp
-//example: instrument only when LevelChunk reads block state; PalettedContainer::Get elsewhere is untouched
+//示例：只在 LevelChunk 读取方块状态时插桩；别处的 PalettedContainer::Get 不动
 new HookRule("NetCraft.Storage.PalettedContainer", "Get", typeof(MyProbe), nameof(MyProbe.OnGet),
     HookType.CallSite, PatchMode.ILRewrite,
     inType: "NetCraft.Storage.LevelChunk", inMethod: "GetBlockState",
     placement: HookPlacement.Before)
 ```
 
-The two modes impose different requirements on the callback signature:
+两种模式对回调签名有不同的要求：
 
-- **Replace mode** aligns with the arguments of the replaced call (including `this` for instance calls); whether the callback restores the original call is up to you.
-- **Insert mode** passes the **host method's parameters** (including `this`), consistent with the `MethodBody` convention. Insertion does not disturb the stack the anchor has already built up; the original call runs as usual, just with one extra callback before or after it.
+- **替换模式**与被替换调用的参数对齐（实例调用包括 `this`）；回调是否恢复原调用由你决定。
+- **插入模式**传递的是**宿主方法的参数**（包括 `this`），与 `MethodBody` 的约定一致。插入不会打扰锚点已经建好的栈；原调用照常运行，只是在它前面或后面多一个回调。
 
-A few boundaries:
+几条边界：
 
-- `InType` and `InMethod` are independent; you may specify just one. Both empty is equivalent to no scoping.
-- Multiple rules may hook the same anchor, each scoped to a different host; **the first host match wins**.
-- `Placement` only applies to instruction-level forms (`CallSite`, `NewObj`, field read/write, `TypeCheck`, `Box`, `FunctionPointer`, and the three kinds in [2.5](#25-in-method-body-anchors-local-variables-and-constants)); `MethodBody` always replaces the whole thing.
-- `Ordinal` counts the **order of matches**, regardless of whether that site is ultimately modified; if the rule does not occur enough times in the host method, the rule does not land. Same idea as Mixin's `@At(ordinal)`.
-- `InType` / `InMethod` / `Placement` / `LocalIndex` / `ConstantValue` are currently available only on the C# API; neither `ncmod.json` nor `[Inject]` supports them (the manifest accepts `ordinal`), so manifest-based mods cannot use the first few.
+- `InType` 和 `InMethod` 相互独立；可以只指定一个。两者都为空等同于不限范围。
+- 多条规则可以注入同一个锚点，各自限定到不同的宿主；**第一个匹配到的宿主胜出**。
+- `Placement` 只适用于指令级形式（`CallSite`、`NewObj`、字段读/写、`TypeCheck`、`Box`、`FunctionPointer`，以及 [2.5](#25-方法体内部锚点局部变量与常量) 中的三种）；`MethodBody` 总是整段替换。
+- `Ordinal` 数的是**匹配的顺序**，与那一处最终是否被修改无关；如果规则在宿主方法中出现的次数不够，规则就不会落地。与 Mixin 的 `@At(ordinal)` 思路相同。
+- `InType` / `InMethod` / `Placement` / `LocalIndex` / `ConstantValue` 目前只在 C# API 上可用；`ncmod.json` 和 `[Inject]` 都不支持它们（清单接受 `ordinal`），所以基于清单的模组用不了前几个。
 
-### 2.5 In-method-body anchors: local variables and constants
+### 2.5 方法体内部锚点：局部变量与常量
 
-The previous kinds anchor to a **referenced entity** (a method, field, or constructor), whereas `LocalRead` / `LocalWrite` / `Constant` anchor to **a position inside the host method body**, corresponding to Mixin's `@ModifyVariable` and `@ModifyConstant`. For these three, `OriginalType` / `OriginalMethod` name the **host method**, not a referenced entity.
+前面几种锚定的是**被引用的实体**（方法、字段或构造函数），而 `LocalRead` / `LocalWrite` / `Constant` 锚定的是**宿主方法体内部的一个位置**，对应 Mixin 的 `@ModifyVariable` 和 `@ModifyConstant`。对于这三种，`OriginalType` / `OriginalMethod` 填的是**宿主方法**，不是被引用的实体。
 
-| Form | Extra parameter | Selected positions |
+| 形式 | 额外参数 | 选中的位置 |
 | --- | --- | --- |
-| `LocalRead` | `LocalIndex` | every read of that slot (0-based) |
-| `LocalWrite` | `LocalIndex` | every write to that slot |
-| `Constant` | `ConstantValue` | every load of that constant, compared by boxed type |
+| `LocalRead` | `LocalIndex` | 对该槽位的每一次读取（从 0 开始） |
+| `LocalWrite` | `LocalIndex` | 对该槽位的每一次写入 |
+| `Constant` | `ConstantValue` | 该常量的每一次加载，按装箱后的类型比较 |
 
 ```csharp
-//example: insert one callback before the write to slot 0 in G
+//示例：在 G 中写入槽位 0 之前插入一个回调
 new HookRule("TargetLib.Host", "G", typeof(MyProbe), nameof(MyProbe.OnWrite),
     HookType.LocalWrite, PatchMode.ILRewrite,
     localIndex: 0, placement: HookPlacement.Before)
 
-//example: replace the constant 5 in G with the return value of OnConst()
+//示例：把 G 中的常量 5 替换为 OnConst() 的返回值
 new HookRule("TargetLib.Host", "G", typeof(MyProbe), nameof(MyProbe.OnConst),
     HookType.Constant, PatchMode.ILRewrite, constantValue: 5)
 ```
 
-In replace mode the callback signature aligns with the **instruction's stack effect**, not the host parameters:
+在替换模式下，回调签名对齐的是**指令的栈效应**，而不是宿主参数：
 
-| Anchor | Stack effect | Replacement method signature |
+| 锚点 | 栈效应 | 替换方法签名 |
 | --- | --- | --- |
-| `LocalRead` | pushes one value | zero parameters, returns that value |
-| `LocalWrite` | pops one value | one parameter |
-| `Constant` | pushes one value | zero parameters, returns that value |
+| `LocalRead` | 压入一个值 | 零参数，返回该值 |
+| `LocalWrite` | 弹出一个值 | 一个参数 |
+| `Constant` | 压入一个值 | 零参数，返回该值 |
 
-`ConstantValue` is compared by boxed type, so `5` (int) and `5L` (long) are two different anchors; to match `ldc.i8` you must pass `long`.
+`ConstantValue` 按装箱后的类型比较，所以 `5`（int）和 `5L`（long）是两个不同的锚点；要匹配 `ldc.i8` 必须传 `long`。
 
-A slot is the compiled local variable index; the same source may change it under a different compiler version, so do not treat it as a stable identifier when porting across versions.
+槽位是编译后的局部变量索引；同一份源码在不同编译器版本下可能改变它，所以跨版本移植时不要把它当作稳定标识。
 
-### 2.6 Runtime injection: modifying already-running code
+### 2.6 运行时注入：修改已在运行的代码
 
-The injection discussed so far all happens **before assembly load** — bytes are rewritten first, then handed to the runtime. The premise is that the target assembly has not been loaded yet.
+前面讨论的注入都发生在**程序集加载之前** —— 先改写字节，再交给运行时。前提是目标程序集尚未加载。
 
-`Lead.Hook` has another route: using the CLR's Profiler interface (ReJIT) to modify code that is **already loaded, or whose methods have already run**. Both share the same `HookRule`, and the parameters from [2.4](#24-narrowing-to-one-site-host-scoping-and-placement) and [2.5](#25-in-method-body-anchors-local-variables-and-constants) remain available:
+`Lead.Hook` 还有另一条路线：用 CLR 的 Profiler 接口（ReJIT）修改**已经加载、或方法已经运行过**的代码。两者共用同一个 `HookRule`，[2.4](#24-收窄到一个位置宿主限定与放置) 和 [2.5](#25-方法体内部锚点局部变量与常量) 中的参数依然可用：
 
 ```csharp
 var engine = new HookEngine();
 engine.AddRule(new HookRule("TargetLib.Host", "Callee", typeof(Hooks), nameof(Hooks.Double),
     hookType: HookType.CallSite, patchMode: PatchMode.RuntimeInject, inMethod: "A"));
 
-//one call and injection is done; no restart and no file changes
+//一次调用注入就完成了；无需重启也无需改文件
 RuntimeInjector.Inject(typeof(Host).Assembly, engine);
 ```
 
-| | Load-time rewriting | Runtime injection |
+| | 加载时改写 | 运行时注入 |
 | --- | --- | --- |
-| Manifest `patchMode` | `ILRewrite` (default) | `RuntimeInject` |
-| Timing | before the assembly enters memory | any time after the process has started |
-| Foundation | Mono.Cecil byte rewriting | CLR Profiler ReJIT |
-| Prerequisite | the target has not been loaded | the target is already in the process |
-| Modify already-JIT-compiled code | not possible | possible |
+| 清单 `patchMode` | `ILRewrite`（默认） | `RuntimeInject` |
+| 时机 | 程序集进入内存之前 | 进程启动后的任意时刻 |
+| 基础 | Mono.Cecil 字节改写 | CLR Profiler ReJIT |
+| 前提 | 目标尚未加载 | 目标已在进程中 |
+| 修改已 JIT 编译的代码 | 不可以 | 可以 |
 
-**Why rules are shared**: Cecil still does the rewriting here, but the result is not written to disk; instead it is compiled into a description handed to the native layer, which submits the new method body to the CLR at runtime, with the remaining version management left to the CLR.
+**为什么规则共用**：这里仍然由 Cecil 做改写，但结果不写盘；而是编译成一份描述交给原生层，由它在运行时把新方法体提交给 CLR，剩余的版本管理留给 CLR。
 
-**How a mod does it**: add a `patchMode` entry to the rule item in `ncmod.json`; the `[Inject]` annotation has a parameter of the same name.
+**模组怎么做**：在 `ncmod.json` 的规则项里加一个 `patchMode` 字段；`[Inject]` 注解有同名参数。
 
 ```json
 { "target": "NetCraft.Game.Server.DedicatedServer", "method": "Tick",
@@ -288,65 +288,65 @@ RuntimeInjector.Inject(typeof(Host).Assembly, engine);
 public static void OnTick(object self) { }
 ```
 
-**What assembly does**: these rules do not go through the load-time rewriting path (`ModHooks.Rewrite` applies only `ILRewrite`); at assembly time a separate runtime target table is recorded. After the kernel assemblies are preloaded and before mods' `Init()`, the loader takes each of their **already loaded** instances and submits the rewritten method bodies to the CLR. If a target is not loaded at that moment it is skipped with a warning, and it will not be loaded early on its behalf — the constraint from [2.2](#22-an-important-constraint-probe-classes-must-not-carry-kernel-types-in-signatures) that "pulling up the kernel early misses the window" is reversed in direction here, with the same conclusion: if it is not present, it cannot be done.
+**组装做了什么**：这些规则不走加载时改写路径（`ModHooks.Rewrite` 只处理 `ILRewrite`）；组装时会单独记录一张运行时目标表。内核程序集预加载完毕、模组 `Init()` 之前，加载器取用它们各自**已加载**的实例，把改写后的方法体提交给 CLR。如果某个目标那一刻尚未加载，就跳过并给一条警告，也不会为它提前加载 —— [2.2](#22-一条重要约束探针类的签名不能带内核类型) 中「提前拉起内核会错过窗口」的约束在这里方向反过来，结论相同：不在场就做不了。
 
-**To hook the native injection layer**: the ReJIT switch can only be set via environment variables at process start (`CORECLR_ENABLE_PROFILING` / `CORECLR_PROFILER` / `CORECLR_PROFILER_PATH`); setting them after startup has no effect. When the loader detects `RuntimeInject` rules early during startup and the process is not yet hooked, it **restarts the process with the same command line** carrying these three variables (`NC_PROFILER_ATTACHED=1` guards against repeated restarts when "hooked but not effective"). The native library `lead_hook_native` must be placed in the program root, or pointed elsewhere via `NC_PROFILER_PATH`; if neither is present, the whole batch of rules is downgraded to a single warning and startup is not blocked.
+**挂上原生注入层**：ReJIT 开关只能在进程启动时通过环境变量设置（`CORECLR_ENABLE_PROFILING` / `CORECLR_PROFILER` / `CORECLR_PROFILER_PATH`）；启动后再设置没有效果。当加载器在启动早期检测到 `RuntimeInject` 规则而进程尚未挂上时，它会**带着这三个变量用同一命令行重启进程**（`NC_PROFILER_ATTACHED=1` 用于防止「已挂上却没生效」时的反复重启）。原生库 `lead_hook_native` 必须放在程序根目录，或用 `NC_PROFILER_PATH` 指向别处；两者都不在时，整批规则降级为一条警告，不阻断启动。
 
-**Do not mix it with load-time rewriting on the same target**: a method body submitted by runtime injection is derived from **original bytes** and does not include changes load-time rewriting made to the same method — if the same method is hit by both rule types, the load-time version is overwritten entirely. Assembly cannot tell whether two rules hit the same method, so it can only make a coarse judgment by target assembly and record a warning.
+**不要和加载时改写混用在同一个目标上**：运行时注入提交的方法体来自**原始字节**，不包含加载时改写对同一方法所做的改动 —— 如果同一个方法同时被两类规则命中，加载时那份会被整体覆盖。组装无法判断两条规则是否命中同一个方法，只能按目标程序集做粗略判断并记录一条警告。
 
-**Annotations do not take part in this path directly**: the native injection layer does not recognize `InjectAttribute` or read `ncmod.json` — it recognizes only description bytes. Annotations and the manifest are both **assembly-time** things (see [2.1](#21-injection-styles-annotations-or-manifest-pick-one)), parsed by `NetCraft.ModLoader` into `HookRule` and then handed to `RuntimeInjector`; the mod side does not need to handle them differently.
+**注解不直接参与这条路径**：原生注入层不认 `InjectAttribute` 也不读 `ncmod.json` —— 它只认描述字节。注解和清单都是**组装期**的东西（见 [2.1](#21-注入风格注解或清单二选一)），由 `NetCraft.ModLoader` 解析成 `HookRule` 再交给 `RuntimeInjector`；模组侧无需分别处理。
 
-**Limitations** (narrower than load-time rewriting): methods with exception handling tables are not supported, the local variable table cannot be changed, generic types and methods are not supported, and operands recognize only method references (field references, string constants, and type tokens throw `NotSupportedException`).
+**限制**（比加载时改写更窄）：不支持带异常处理表的方法，不能改变局部变量表，不支持泛型类型和方法，操作数只认方法引用（字段引用、字符串常量和类型 token 会抛 `NotSupportedException`）。
 
-**Performance**: injection happens only at registration; afterward the method is ordinary JIT code with the same call overhead as without injection. Attaching the profiler has a one-time cost — enabling ReJIT requires disabling ReadyToRun images at the same time, and measured process startup is about 80–110 ms slower; steady-state computation shows no difference. For a server like NC whose startup is already measured in seconds, this is negligible.
+**性能**：注入只发生在注册时；之后方法就是普通的 JIT 代码，调用开销与不注入相同。挂上 profiler 有一次性的代价 —— 启用 ReJIT 需要同时禁用 ReadyToRun 镜像，实测进程启动慢约 80–110 ms；稳态计算没有差别。对 NC 这种启动本来就以秒计的服务器来说，可以忽略。
 
-### 2.7 Do two mods modifying the same class conflict like Mixin?
+### 2.7 两个模组修改同一个类会像 Mixin 那样冲突吗？
 
-First, why things conflict on the Mixin side. Mixin **mixes members into the target class** and applies them at class load: when multiple mixins mix into the same class, cases like injecting at the same place repeatedly or adding same-named members to the same class throw `MixinApplyError`, and the default fail-hard **kills the game outright**; moreover this detection happens at the instant of class load, when the game may already be half-running.
+先说 Mixin 那边为什么会冲突。Mixin 会把**成员混入目标类**并在类加载时应用：当多个 mixin 混入同一个类时，重复注入同一处、给同一个类加入同名成员等情况会抛 `MixinApplyError`，而默认的 fail-hard 会**直接把游戏干掉**；而且这个检测发生在类加载的一瞬间，此时游戏可能已经跑了一半。
 
-NC's model is different, and the surface where conflicts can happen is much smaller:
+NC 的模型不同，可能冲突的层面小得多：
 
 | | Mixin | NetCraft |
 | --- | --- | --- |
-| Landing method | mix members into the target class + rewrite bytecode | rewrite IL instructions only; no type synthesis, no members added |
-| Structural conflicts (same-named members, inheritance conflicts) | yes | none |
-| When rules are validated | at class load | at assembly time, statically reading metadata |
-| Two rules hitting the same place | throws | first come, first served; the latter silently fails |
-| One mod fails | may drag down the whole load | affects only itself |
+| 落地方式 | 把成员混入目标类 + 改写字节码 | 只改写 IL 指令；不合成类型、不增加成员 |
+| 结构冲突（同名成员、继承冲突） | 有 | 无 |
+| 规则何时校验 | 类加载时 | 组装时静态读取元数据 |
+| 两条规则命中同一处 | 抛异常 | 先到先得；后者静默失败 |
+| 一个模组失败 | 可能拖垮整个加载 | 只影响自己 |
 
-**Static validation**: rules are not built by loading assemblies and reflecting over types, but by reading PE metadata tables. So problems like "the target type is not in any known assembly" or "the injection form is misspelled" are recorded and skipped **early at startup**, without waiting for a class to load before exploding.
+**静态校验**：规则不是靠加载程序集并反射类型来构建的，而是靠读取 PE 元数据表。所以「目标类型不在任何已知程序集中」「注入形式拼错」之类的问题会在**启动早期**就被记录并跳过，不必等到某个类加载时才爆。
 
-**Failure isolation**: when a mod's rules fail to parse, the replacement class fails to load, or the entry `Init()` throws, only **that one mod** is marked as failed (status `Error`, shown as "load failed" on the MODS page) and the other mods load as usual. One wording needs correcting here: NC has **no runtime unloading** — mods are loaded once, and `ModManager` explicitly does not offer dynamic loading/unloading. So-called "auto-unload on failure" is actually **load-time isolation**: a failed mod is not initialized, but it is also not "unloaded".
+**故障隔离**：当某个模组的规则解析失败、替换类加载失败或入口 `Init()` 抛异常时，只有**这一个模组**被标记为失败（状态 `Error`，在 MODS 页面上显示为「加载失败」），其它模组照常加载。这里有一处措辞需要纠正：NC **没有运行时卸载** —— 模组只加载一次，`ModManager` 明确不提供动态加载/卸载。所谓「失败自动卸载」实际上是**加载时隔离**：失败的模组不会被初始化，但它也没有被「卸载」。
 
-**Dynamic injection**: on the ReJIT route from [2.6](#26-runtime-injection-modifying-already-running-code), the semantics of several mods competing for the same method match the static case — the first registered wins, and later requests are sent but cannot claim it (`GetReJITParameters` claims by "module + method", taking the first).
+**动态注入**：[2.6](#26-运行时注入修改已在运行的代码) 的 ReJIT 路线上，多个模组争抢同一个方法时的语义与静态情形一致 —— 第一个注册的胜出，后来的请求虽然发出但抢不到（`GetReJITParameters` 按「模块 + 方法」认领，取第一个）。
 
-We hit a pitfall on this route once, worth recording: in an early implementation, `FindTypeRef`'s **resolution scope parameter was passed as `mdTokenNil`**, whose semantics are "match only TypeRefs with no resolution scope" — our references all hang off `AssemblyRef`, so the one we had built was never found. It manifested as: the first injection succeeded, but on the second injection reference resolution failed, no new method body could be built, the CLR fell back to the original IL, and **the first injection was lost along with it** (the target method reverted to its uninjected behavior). After the fix it no longer reproduced, but the limitation remains: **metadata injection of references must complete within the window right after the target module loads; the later it is, the more likely it fails**.
+我们在这条路线上踩过一次坑，值得记录：在早期实现中，`FindTypeRef` 的**解析范围参数传成了 `mdTokenNil`**，其语义是「只匹配没有解析范围的 TypeRef」 —— 我们的引用全都挂在 `AssemblyRef` 上，于是自己构建的那个永远找不到。表现是：第一次注入成功，但第二次注入时引用解析失败，构建不出新方法体，CLR 回退到原始 IL，**连同第一次注入一起丢了**（目标方法退回未注入的行为）。修复后不再复现，但限制仍在：**引用的元数据注入必须在目标模块加载后的窗口内完成；越晚越容易失败**。
 
-**The cost must be stated clearly**: NC's non-crashing behavior comes at the cost of conflicts being easily missed — Mixin at least interrupts loading, whereas NC lets the later one silently fail. To address this, assembly performs a **same-anchor conflict check**: when the same injection point is declared by multiple mods, the later-assembled one is recorded in `ModHooks.Warnings` and reported as a warning in the startup log (without blocking loading):
+**代价必须说清楚**：NC 不崩溃的行为，代价是冲突容易被漏掉 —— Mixin 至少会打断加载，而 NC 让后来的静默失败。为此，组装会做一次**同锚点冲突检查**：当同一个注入点被多个模组声明时，后组装的会记录进 `ModHooks.Warnings`，并在启动日志中作为警告报出（不阻断加载）：
 
 ```
 Mod injection conflict mod my-mod-b's injection NetCraft.Game.Server.DedicatedServer::Tick[CallSite/ILRewrite] is already taken by mod my-mod-a; this rule will not take effect
 ```
 
-The detection key is "target type + method + injection form + patch mode". **Host scoping is not distinguished** — neither the manifest nor annotations can write `InType`/`InMethod`, so rules coming from mods are naturally whole-assembly in scope, and the same key means a collision. Rules added directly via the C# API bypass this check, since in that case two rules may each hit a different host and are inherently non-conflicting.
+检测键是「目标类型 + 方法 + 注入形式 + 补丁模式」。**宿主限定不参与区分** —— 清单和注解都写不了 `InType`/`InMethod`，所以来自模组的规则天然是整程序集范围，键相同就意味着冲突。通过 C# API 直接添加的规则绕过这项检查，因为那种情况下两条规则可能各自命中不同的宿主，本质上不冲突。
 
-**Runtime injection goes through this check too**: it enters the same assembly entry point, and the patch mode in the detection key keeps it separate from load-time rewriting; when both types land on the same target assembly there is a separate overwrite notice (see [6.4](#64-two-mods-injecting-the-same-target)).
+**运行时注入也走这项检查**：它进入同一个组装入口，检测键里的补丁模式让它与加载时改写区分开；当两类规则落在同一个目标程序集上时，另有一条覆盖提示（见 [6.4](#64-两个模组注入同一个目标)）。
 
-### 2.8 Mixins: adding members to a target type
+### 2.8 Mixin：给目标类型增加成员
 
-The previous sections all modify instructions in existing code and cannot create anything new. To **add fields, methods, or interfaces** to a target type, use a mixin.
+前面几节修改的都是既有代码中的指令，创造不出新东西。要**给目标类型增加字段、方法或接口**，用 mixin。
 
-The relationship to Mixin's syntax is as follows:
+与 Mixin 语法的关系如下：
 
 | Mixin | NC |
 | --- | --- |
-| `@Mixin(X.class)` on the mixin class | `[Mixin(typeof(X))]` on the source class |
-| members of the mixin class are mixed into the target class | fields and methods of the source class are moved into the target type |
-| `@Unique` adds a private field | write an ordinary field in the source class; it is moved over the same way |
-| `@Shadow` references an existing member of the target class | not needed; write `X`'s members directly and then hook them |
+| mixin 类上的 `@Mixin(X.class)` | 源类上的 `[Mixin(typeof(X))]` |
+| mixin 类的成员被混入目标类 | 源类的字段和方法被移入目标类型 |
+| `@Unique` 添加一个私有字段 | 在源类里写一个普通字段；以同样方式移过去 |
+| `@Shadow` 引用目标类的既有成员 | 不需要；直接写 `X` 的成员再注入即可 |
 | `@Implements` / `implements` | `Interfaces` |
 
-It can also be written in the manifest:
+也可以写在清单里：
 
 ```json
 {
@@ -360,79 +360,79 @@ It can also be written in the manifest:
 [Mixin(typeof(SomeEntity), Interfaces = new[] { typeof(ITagged) })]
 public class SomeEntityMixin
 {
-    //after being moved over, this is an instance field on the target type
+    //移过去之后，这就是目标类型上的一个实例字段
     public int MyCounter = 5;
 
-    //a mixed-in method; it reads/writes the field moved along with it
+    //一个混入的方法；它读写随之移过来的字段
     public int Bump() => MyCounter + 1;
 
-    //the implementation the interface requires; after being moved over the target type implements ITagged
+    //接口要求的实现；移过去之后目标类型就实现了 ITagged
     public string Describe() => $"tagged:{MyCounter}";
 }
 ```
 
-**Move, not copy**. These members are removed from the source class, leaving only an empty shell — just like Mixin's mixin class, **mod code should no longer use that class** (`new SomeEntityMixin()` or calling its methods will fail to find the members).
+**是移动，不是复制**。这些成员从源类中移除，只留下一个空壳 —— 和 Mixin 的 mixin 类一样，**模组代码不应再使用那个类**（`new SomeEntityMixin()` 或调用它的方法会找不到成员）。
 
-A few landing rules:
+几条落地规则：
 
-- **Only applies to load-time rewriting**. The target type must be in a kernel assembly or mod assembly that has not entered memory yet. Runtime injection only submits method bodies and cannot change type layout, so this form cannot exist on it.
-- **Constructor initializers come along**. Values written in the source class's field initializers are merged into every instance constructor of the target type; static field initializers are merged into the static constructor (created if the target has none). The base-class chaining call inside the source class's constructor is stripped, so the base constructor is not run twice.
-- **Rules with interfaces mark the moved public instance methods as virtual**. Interface dispatch only recognizes the vtable, and without the marker the CLR would determine the interface is not implemented and fail to load outright. So do not expect those methods to stay non-virtual when mixing in an interface.
-- **Same-named members are skipped**. When the target type already has a field or method with the same name, that one item is not moved and the rest proceed as usual. When two mods mix into the same target type, both land, and only the name-colliding part of the latter is skipped — gentler than the "latter fails entirely" behavior of hooks in [2.7](#27-do-two-mods-modifying-the-same-class-conflict-like-mixin).
-- **Nested types are not moved**, and nested types or generic methods in the source class are also currently outside this path's coverage.
+- **只适用于加载时改写**。目标类型必须在尚未进入内存的内核程序集或模组程序集中。运行时注入只提交方法体，无法改变类型布局，所以这种形式在它上面不存在。
+- **构造函数初始化器会一起带过去**。写在源类字段初始化器里的值会并入目标类型的每一个实例构造函数；静态字段初始化器并入静态构造函数（目标没有就创建）。源类构造函数里的基类链接调用会被剥离，所以基类构造函数不会被运行两次。
+- **带接口的规则会把移入的公共实例方法标记为虚方法**。接口派发只认虚表，没有这个标记 CLR 会判定接口未实现并直接加载失败。所以混入接口时，别指望那些方法保持非虚。
+- **同名成员会被跳过**。当目标类型已有同名字段或方法时，那一项不移动，其余照常进行。两个模组混入同一个目标类型时，两者都会落地，只有后者的同名部分被跳过 —— 比 [2.7](#27-两个模组修改同一个类会像-mixin-那样冲突吗) 中 hook 的「后者整体失败」行为更温和。
+- **嵌套类型不会被移动**，源类中的嵌套类型或泛型方法目前也不在这条路径的覆盖范围内。
 
-The source type must be in **the mod's own assembly**, so neither the manifest nor the annotation writes an assembly name.
+源类型必须在**模组自己的程序集**中，所以清单和注解都不写程序集名。
 
-### 2.9 Two routes: wrapper layer and extension points
+### 2.9 两条路线：包装层与扩展点
 
-`NetCraft.ModApi`'s public surface is split into two namespaces, corresponding to two usages:
+`NetCraft.ModApi` 的公共表面分为两个命名空间，对应两种用法：
 
-| Namespace | Contents | What you get |
+| 命名空间 | 内容 | 你能得到什么 |
 | --- | --- | --- |
-| `NetCraft.ModApi.Wrapper` | `ServerEvents` / `ClientEvents` / `NetworkEvents`, `NcServer` / `NcWorld` / `NcPlayers` / `NcLists` / `NcRegistries` / `NcRecipes` / `NcStartup`, and object handles like `NcPlayer` / `NcLevel` | wrapper types; no kernel types on the public surface |
-| `NetCraft.ModApi.Extension` | `[Inject]` / `[Mixin]` annotations | rules bind to kernel class and method names |
+| `NetCraft.ModApi.Wrapper` | `ServerEvents` / `ClientEvents` / `NetworkEvents`，`NcServer` / `NcWorld` / `NcPlayers` / `NcLists` / `NcRegistries` / `NcRecipes` / `NcStartup`，以及 `NcPlayer` / `NcLevel` 等对象句柄 | 包装类型；公共表面上没有内核类型 |
+| `NetCraft.ModApi.Extension` | `[Inject]` / `[Mixin]` 注解 | 规则绑定到内核的类名和方法名 |
 
-The two are **parallel** routes, not one layered on top of the other:
+两者是**平行**路线，不是一层叠在另一层上：
 
-- **For stability, use `Wrapper`**. The facades handle the kernel's tedious call ordering for you (writing a single block while touching the level, the player list, and the sync chain is one example), and event args are all wrapper types. The cost is that capabilities the facades do not expose are unavailable to you.
-- **For completeness, use `Extension`**. Injection rules modify kernel classes and methods directly, but the target names you write are the kernel's names, so when the kernel changes the rules must change with it.
+- **要稳定就用 `Wrapper`**。门面替你处理内核繁琐的调用顺序（写一个方块同时牵动世界、玩家列表和同步链就是一个例子），事件 args 也全是包装类型。代价是门面没有暴露的能力你就用不了。
+- **要完整就用 `Extension`**。注入规则直接修改内核的类和方法，但你写的目标名就是内核的名字，所以内核一变规则就得跟着变。
 
-You can reference both. The `Wrapper` line is being consolidated toward "no kernel types on the public surface"; the player and level parts are done — `Player` / `Attacker` in player events and the in/out parameters of `NcPlayers` are `NcPlayer` handles, `NcWorld.Overworld` / `Nether` / `End` / `Get` and `LevelTickArgs.Level` are `NcLevel` handles, and block coordinates are plain `x y z` ints; entities and the remaining value types (`BlockPos` / `BlockState` / `Vec3`) are not wrapped yet.
+两者都可以引用。`Wrapper` 这条线正在向「公共表面上没有内核类型」收敛；玩家和世界部分已完成 —— 玩家事件里的 `Player` / `Attacker` 以及 `NcPlayers` 的入/出参数都是 `NcPlayer` 句柄，`NcWorld.Overworld` / `Nether` / `End` / `Get` 和 `LevelTickArgs.Level` 都是 `NcLevel` 句柄，方块坐标是普通的 `x y z` 整数；实体和其余值类型（`BlockPos` / `BlockState` / `Vec3`）还没包装。
 
-One more boundary to call out: **the wrapper layer does not shield injection**. The `hooks` rules or `[Inject]` annotations you write still bind to kernel class and method names, and break just the same when the kernel changes.
+还有一条边界要指出：**包装层不隔离注入**。你写的 `hooks` 规则或 `[Inject]` 注解仍然绑定到内核的类名和方法名，内核一变照样断。
 
 ---
 
-## 3. Migrating from Fabric
+## 3. 从 Fabric 迁移
 
-### 3.1 Concept mapping
+### 3.1 概念对照
 
 | Fabric | NetCraft |
 | --- | --- |
-| `fabric.mod.json` | the `ncmod.json` embedded in the dll |
-| `ModInitializer.onInitialize()` | the entry class's `public Task Init()` |
-| `@Inject` / `@Redirect` | the `[Inject]` annotation, or rules like `Mark` / `Probe` / `CallSite` in `hooks` |
-| `@ModifyVariable` | `LocalRead` / `LocalWrite`, see [2.5](#25-in-method-body-anchors-local-variables-and-constants); not writable as an annotation |
-| `@ModifyConstant` | `Constant`, see [2.5](#25-in-method-body-anchors-local-variables-and-constants); not writable as an annotation |
-| `@Accessor` | no equivalent yet (`private` members need no visibility widening; just write a rule) |
-| `Registry.register(...)` | the kernel registry (`BuiltInRegistries`) |
+| `fabric.mod.json` | 内嵌在 dll 中的 `ncmod.json` |
+| `ModInitializer.onInitialize()` | 入口类的 `public Task Init()` |
+| `@Inject` / `@Redirect` | `[Inject]` 注解，或 `hooks` 中的 `Mark` / `Probe` / `CallSite` 等规则 |
+| `@ModifyVariable` | `LocalRead` / `LocalWrite`，见 [2.5](#25-方法体内部锚点局部变量与常量)；无法写成注解 |
+| `@ModifyConstant` | `Constant`，见 [2.5](#25-方法体内部锚点局部变量与常量)；无法写成注解 |
+| `@Accessor` | 暂无对应物（`private` 成员无需放宽可见性；直接写规则即可） |
+| `Registry.register(...)` | 内核注册表（`BuiltInRegistries`） |
 | `ServerLifecycleEvents.SERVER_STARTED` | `ServerEvents.Started` |
 | `ServerTickEvents.END_SERVER_TICK` | `ServerEvents.Tick` |
 | `CommandRegistrationCallback` | `ServerEvents.CommandRegister` |
 | `ClientTickEvents.END_CLIENT_TICK` | `ClientEvents.Tick` |
-| `FabricLoader.getInstance().getModContainer(id)` | no equivalent yet (`ModManager` is not open to mods) |
-| `@Mixin` / `@Unique` / `@Implements` | the `[Mixin]` annotation or the manifest's `mixins`, see [2.8](#28-mixins-adding-members-to-a-target-type) |
+| `FabricLoader.getInstance().getModContainer(id)` | 暂无对应物（`ModManager` 不对模组开放） |
+| `@Mixin` / `@Unique` / `@Implements` | `[Mixin]` 注解或清单的 `mixins`，见 [2.8](#28-mixin给目标类型增加成员) |
 
-### 3.2 What does not carry over
+### 3.2 不能照搬的部分
 
-- **Mixin's annotation system**: NC has two annotations, `[Inject]` and `[Mixin]`, both of which are only **declaration styles**, equivalent to `hooks` / `mixins` in `ncmod.json` and merged at assembly (they are resolved by the loader, not `Lead.Hook`, see [2.1](#21-injection-styles-annotations-or-manifest-pick-one)). Instruction rewriting lands at load time by default, and can be changed to runtime submission per [2.6](#26-runtime-injection-modifying-already-running-code); adding members and interfaces goes through the mixins of [2.8](#28-mixins-adding-members-to-a-target-type). Targeting has no `@At`-style string syntax, but forms like `CallSite`/`FieldRead`/`LocalWrite`/`Constant`, together with `Ordinal`, `InType`/`InMethod`, and `Placement`, can cover the usages of `HEAD`/`RETURN`/`INVOKE`/`FIELD`/`NEW`/`CONSTANT`/`LOAD`/`STORE` and `shift`; what is missing is `JUMP`.
-- **AccessWidener**: none. Visibility is no obstacle to IL rewriting in NC; `private` methods can be hooked the same way (the rewriter works at the byte level).
-- **Yarn / Mojang mappings**: not needed. NC is C# source translated directly from vanilla, with type and method names corresponding to vanilla, only with naming style following C#.
-- **The vast majority of Fabric API modules**: only capabilities covered by `NetCraft-ModApi` are available; for the rest, write your own injection rules or wait for the API to catch up.
+- **Mixin 的注解体系**：NC 有两个注解 `[Inject]` 和 `[Mixin]`，它们都只是**声明风格**，等价于 `ncmod.json` 中的 `hooks` / `mixins` 并在组装时合并（由加载器解析，不是 `Lead.Hook`，见 [2.1](#21-注入风格注解或清单二选一)）。指令改写默认在加载时落地，可按 [2.6](#26-运行时注入修改已在运行的代码) 改为运行时提交；增加成员和接口走 [2.8](#28-mixin给目标类型增加成员) 的 mixin。目标定位没有 `@At` 式的字符串语法，但 `CallSite`/`FieldRead`/`LocalWrite`/`Constant` 等形式，配合 `Ordinal`、`InType`/`InMethod` 和 `Placement`，能覆盖 `HEAD`/`RETURN`/`INVOKE`/`FIELD`/`NEW`/`CONSTANT`/`LOAD`/`STORE` 以及 `shift` 的用法；缺的是 `JUMP`。
+- **AccessWidener**：没有。在 NC 中可见性不是 IL 改写的障碍；`private` 方法照样能注入（改写器工作在字节层面）。
+- **Yarn / Mojang 映射**：不需要。NC 是直接从原版翻译过来的 C# 源码，类型和方法名与原版对应，只是命名风格遵循 C#。
+- **绝大多数 Fabric API 模块**：只有 `NetCraft-ModApi` 覆盖到的能力可用；其余的自己写注入规则，或者等 API 跟上。
 
-### 3.3 A side-by-side example
+### 3.3 一个对照示例
 
-Fabric: log a line when the server starts and register a command.
+Fabric：服务器启动时打一行日志并注册一条命令。
 
 ```java
 public class MyMod implements ModInitializer {
@@ -449,7 +449,7 @@ public class MyMod implements ModInitializer {
 }
 ```
 
-NC:
+NC：
 
 ```csharp
 public sealed class MyModEntry
@@ -469,7 +469,7 @@ public sealed class MyModEntry
 }
 ```
 
-Manifest (`ncmod.json`, as an embedded resource):
+清单（`ncmod.json`，作为嵌入资源）：
 
 ```json
 {
@@ -481,28 +481,28 @@ Manifest (`ncmod.json`, as an embedded resource):
 }
 ```
 
-Note: even an empty `hooks` works here — events like `ServerEvents.Started` are provided by `NetCraft-ModApi`'s own probes, and your mod only needs to subscribe (`ServerEvents` is under `NetCraft.ModApi.Wrapper`, see [2.9](#29-two-routes-wrapper-layer-and-extension-points)). You only need to write your own hook rules when you want to hook a place in the kernel where ModApi does not yet provide an event.
+注意：这里即使 `hooks` 为空也能工作 —— 像 `ServerEvents.Started` 这样的事件由 `NetCraft-ModApi` 自己的探针提供，你的模组只需订阅（`ServerEvents` 在 `NetCraft.ModApi.Wrapper` 下，见 [2.9](#29-两条路线包装层与扩展点)）。只有当你想要注入内核中 ModApi 还没有提供事件的地方时，才需要自己写 hook 规则。
 
 ---
 
-## 4. Basic requirements for an ncm
+## 4. 一个 ncm 的基本要求
 
-ncm means NetCraft mod. An ncm is a .NET class library dll embedding an `ncmod.json`, placed in the `mods/` directory.
+ncm 指 NetCraft 模组。一个 ncm 是一个内嵌 `ncmod.json` 的 .NET 类库 dll，放在 `mods/` 目录下。
 
-The easiest way to start is the template:
+最简单的起步方式是模板：
 
 ```
 dotnet new install NetCraft.ModsProjectType
 dotnet new ncm -n MyMod -e server
 ```
 
-If the local package has not been published yet, use `dotnet new install <nupkg path>`, or run `dotnet pack` in the repository and then install the output.
+如果本地包还没发布，用 `dotnet new install <nupkg path>`，或者在仓库里运行 `dotnet pack` 再安装输出。
 
-`-e` takes `both` (default) / `server` / `client`, determining the manifest's `environment` and which side's subscription code is generated in the entry class. The template ships the NC reference assemblies, so no project reference is needed, and `ncmod.json`'s id / entry are filled in from the project name.
+`-e` 接受 `both`（默认）/ `server` / `client`，决定清单的 `environment` 以及入口类中生成哪一侧的订阅代码。模板自带 NC 引用程序集，所以不需要项目引用，`ncmod.json` 的 id / entry 会根据项目名自动填入。
 
-Starting at 4.1, the following covers what a hand-written project must satisfy.
+从 4.1 开始，下面讲手写项目必须满足什么。
 
-### 4.1 Project file
+### 4.1 项目文件
 
 ```xml
 <Project Sdk="Microsoft.NET.Sdk">
@@ -513,7 +513,7 @@ Starting at 4.1, the following covers what a hand-written project must satisfy.
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Private must be turned off, otherwise the NC assemblies get embedded into the mod dll by EmbedDependencies in 4.6 -->
+    <!-- Private 必须关掉，否则 NC 程序集会被 4.6 中的 EmbedDependencies 嵌入到模组 dll 中 -->
     <ProjectReference Include="xxx\NetCraft\NetCraft.csproj" Private="false" />
     <ProjectReference Include="xxx\NetCraft.ModApi\NetCraft.ModApi.csproj" Private="false" />
   </ItemGroup>
@@ -524,11 +524,11 @@ Starting at 4.1, the following covers what a hand-written project must satisfy.
 </Project>
 ```
 
-`LogicalName` must be `ncmod.json`; the scanner recognizes only that name.
+`LogicalName` 必须是 `ncmod.json`；扫描器只认这个名字。
 
-The template takes a different route: assembly references under `libs/` (`Reference Include="libs\*.dll" Private="false"`). Follow that when you do not have the NC source. What both approaches share is that **NC's own dlls must never enter the output directory** — `EmbedDependencies` from [4.6](#46-third-party-dependencies) embeds third-party dlls from the output directory into the mod, and if NC's assemblies get embedded too there will be two sets of type identity.
+模板走的是另一条路：`libs/` 下的程序集引用（`Reference Include="libs\*.dll" Private="false"`）。没有 NC 源码时照那个来。两种方式共同的一点是**NC 自己的 dll 绝不能进入输出目录** —— [4.6](#46-第三方依赖) 的 `EmbedDependencies` 会把输出目录里的第三方 dll 嵌入模组，如果 NC 程序集也被嵌进去就会出现两套类型标识。
 
-### 4.2 ncmod.json fields
+### 4.2 ncmod.json 字段
 
 ```json
 {
@@ -546,23 +546,23 @@ The template takes a different route: assembly references under `libs/` (`Refere
 }
 ```
 
-| Field | Required | Notes |
+| 字段 | 必填 | 说明 |
 | --- | --- | --- |
-| `id` | Yes | mod identifier, used by dependencies and lookups. An empty string is skipped by the scanner |
-| `version` | Recommended | version number; when depended on by other mods, version constraints are judged by it, see below |
-| `name` | No | display name; this is what the mod page shows, defaulting back to `id` |
-| `description` | No | one-line description |
-| `authors` / `contributors` | No | credits, a string array |
-| `license` | No | license identifier |
-| `contact` | No | external links; may take `homepage` / `sources` / `issues` |
-| `icon` | No | the icon's embedded resource name, see 4.7 |
-| `environment` | No | `both` / `client` / `server`, default `both`. When it does not match the current side the whole mod is not loaded |
-| `entry` | Yes | full name of the entry class; the class must have `public Task Init()` |
-| `depends` | No | other mods it depends on and required versions, see below |
-| `hooks` | No | list of injection rules; an empty array means subscribing only to events ModApi already has |
-| `mixins` | No | list of mixin rules; moves members of one of this mod's classes into the target type, see [2.8](#28-mixins-adding-members-to-a-target-type) |
+| `id` | 是 | 模组标识符，用于依赖和查找。空字符串会被扫描器跳过 |
+| `version` | 推荐 | 版本号；被其他模组依赖时，版本约束按它判断，见下 |
+| `name` | 否 | 显示名；模组页面显示的就是它，缺省回退到 `id` |
+| `description` | 否 | 一行描述 |
+| `authors` / `contributors` | 否 | 鸣谢，字符串数组 |
+| `license` | 否 | 许可证标识符 |
+| `contact` | 否 | 外部链接；可以取 `homepage` / `sources` / `issues` |
+| `icon` | 否 | 图标的嵌入资源名，见 4.7 |
+| `environment` | 否 | `both` / `client` / `server`，默认 `both`。与当前侧不匹配时整个模组不加载 |
+| `entry` | 是 | 入口类的全名；该类必须有 `public Task Init()` |
+| `depends` | 否 | 它依赖的其他模组及所需版本，见下 |
+| `hooks` | 否 | 注入规则列表；空数组表示只订阅 ModApi 已有的事件 |
+| `mixins` | 否 | mixin 规则列表；把本模组某个类的成员移入目标类型，见 [2.8](#28-mixin给目标类型增加成员) |
 
-`depends` declares other mods it depends on and required versions; the key is a mod id and the value is a version constraint:
+`depends` 声明它依赖的其他模组及所需版本；键是模组 id，值是版本约束：
 
 ```json
 {
@@ -573,34 +573,34 @@ The template takes a different route: assembly references under `libs/` (`Refere
 }
 ```
 
-**Dependencies not written into `depends` carry no version constraint**. Inter-mod dependencies are already inferred automatically from compile-time references (see [6.1](#61-mod-dependency--injecting-the-depended-on-mod)), and `depends` only adds version constraints on top. When the depended-on mod is not on the current side the check is skipped — that case is left to assembly resolution to report.
+**没有写进 `depends` 的依赖不带版本约束**。模组间的依赖已经从编译期引用自动推断（见 [6.1](#61-模组依赖--注入被依赖的模组)），`depends` 只是在上面追加版本约束。被依赖的模组不在当前侧时跳过检查 —— 那种情况留给程序集解析去报告。
 
-| Constraint syntax | Meaning |
+| 约束语法 | 含义 |
 | --- | --- |
-| `*` | any version, equivalent to omitting the entry |
-| `1.2.3` | segment prefix; `1.2` matches `1.2` and `1.2.9` but not `1.3` |
-| `^1.2.3` | same major version and not less than the baseline; when the major version is 0 the minor version is used instead, so `0.1` and `0.2` count as incompatible |
-| `>=1.2.3` | not less than the baseline |
+| `*` | 任意版本，等同于省略该项 |
+| `1.2.3` | 段前缀；`1.2` 匹配 `1.2` 和 `1.2.9`，但不匹配 `1.3` |
+| `^1.2.3` | 主版本相同且不低于基线；主版本为 0 时改用次版本判断，所以 `0.1` 和 `0.2` 视为不兼容 |
+| `>=1.2.3` | 不低于基线 |
 
-Version numbers take only the leading digits of each segment, so `26.2-netcraft` participates as `26.2`. When versions do not match, **only the declaring mod is skipped** and the rest load as usual; the startup log states "dependency X requires version …, actual version …".
+版本号只取每一段的前导数字，所以 `26.2-netcraft` 以 `26.2` 参与。版本不匹配时，**只跳过声明的那个模组**，其余照常加载；启动日志会写「依赖 X 需要版本 …，实际版本 …」。
 
-The judgment basis is the `version` field in the depended-on mod's manifest. So **a mod intended to be depended on must set `version` correctly** — an empty version number satisfies no specific constraint.
+判断依据是被依赖模组清单里的 `version` 字段。所以**打算被依赖的模组必须正确设置 `version`** —— 空版本号满足不了任何具体约束。
 
-### 4.3 hook rule fields
+### 4.3 hook 规则字段
 
-| Field | Notes |
+| 字段 | 说明 |
 | --- | --- |
-| `target` | full name of the target type; must be in a kernel assembly or one of the mod assemblies under `mods/` |
-| `method` | target method name; same-name overloads all match |
-| `type` | injection form, see the appendix |
-| `patchMode` | landing method, `ILRewrite` (default) or `RuntimeInject`, see [2.6](#26-runtime-injection-modifying-already-running-code) |
-| `ordinal` | when the same anchor matches multiple places in the host method, pick which, 0-based, see [2.4](#24-narrowing-to-one-site-host-scoping-and-placement) |
-| `replaceType` | full name of the class containing the replacement method |
-| `replaceMethod` | replacement method name |
-| `label` | probe label, used only by `Mark` and `Probe` |
-| `environment` | the side the rule applies to, default `both`; a rule targeting a server type run on the client has no target at all and is filtered out by `environment` |
+| `target` | 目标类型的全名；必须在某个内核程序集或 `mods/` 下的某个模组程序集中 |
+| `method` | 目标方法名；同名重载全部匹配 |
+| `type` | 注入形式，见附录 |
+| `patchMode` | 落地方式，`ILRewrite`（默认）或 `RuntimeInject`，见 [2.6](#26-运行时注入修改已在运行的代码) |
+| `ordinal` | 同一个锚点在宿主方法中匹配到多处时选哪一处，从 0 开始，见 [2.4](#24-收窄到一个位置宿主限定与放置) |
+| `replaceType` | 包含替换方法的类的全名 |
+| `replaceMethod` | 替换方法名 |
+| `label` | 探针标签，只被 `Mark` 和 `Probe` 使用 |
+| `environment` | 规则适用的侧，默认 `both`；针对服务端类型的规则在客户端上运行根本没有目标，会被 `environment` 过滤掉 |
 
-The same rule can also be written as an annotation on the replacement method; the correspondence is:
+同一条规则也可以写成替换方法上的注解；对应关系是：
 
 ```csharp
 [Inject(typeof(SomeType), nameof(SomeType.SomeMethod),
@@ -608,45 +608,45 @@ The same rule can also be written as an annotation on the replacement method; th
 public static void OnSomeMethod(object self) { }
 ```
 
-| Manifest field | Annotation form |
+| 清单字段 | 注解形式 |
 | --- | --- |
-| `target` | the first constructor parameter, written as `typeof(...)` |
-| `method` | the second constructor parameter, preferably `nameof(...)` |
-| `type` | named parameter `HookType`, default `CallSite` |
-| `patchMode` | named parameter `PatchMode`, default `ILRewrite` |
-| `ordinal` | named parameter `Ordinal` |
-| `label` | named parameter `Label` |
-| `environment` | named parameter `Environment`, default `both` |
-| `replaceType` | not written; taken automatically from the class it annotates |
-| `replaceMethod` | not written; taken automatically from the method it annotates |
+| `target` | 第一个构造函数参数，写成 `typeof(...)` |
+| `method` | 第二个构造函数参数，最好用 `nameof(...)` |
+| `type` | 命名参数 `HookType`，默认 `CallSite` |
+| `patchMode` | 命名参数 `PatchMode`，默认 `ILRewrite` |
+| `ordinal` | 命名参数 `Ordinal` |
+| `label` | 命名参数 `Label` |
+| `environment` | 命名参数 `Environment`，默认 `both` |
+| `replaceType` | 不写；自动取它所注解的类 |
+| `replaceMethod` | 不写；自动取它所注解的方法 |
 
-The annotations come from `InjectAttribute` in `NetCraft.ModApi.Extension`, so mods using annotations must reference it. When annotations and the manifest both exist they are merged, and if the same injection point is declared in both **the annotation wins**.
+注解来自 `NetCraft.ModApi.Extension` 中的 `InjectAttribute`，所以使用注解的模组必须引用它。注解和清单同时存在时会合并，如果同一个注入点在两边都声明，**注解胜出**。
 
-Mixin rules use a different set of fields: `target` (full name of the target type), `source` (full name of the source type, which must be in the mod's own assembly), `interfaces` (optional, an array of interface full names); for semantics see [2.8](#28-mixins-adding-members-to-a-target-type). `[Mixin(typeof(target))]` on the source class is equivalent to the manifest entry.
+Mixin 规则使用另一组字段：`target`（目标类型全名）、`source`（源类型全名，必须在模组自己的程序集中）、`interfaces`（可选，接口全名数组）；语义见 [2.8](#28-mixin给目标类型增加成员)。源类上的 `[Mixin(typeof(target))]` 等价于清单项。
 
-### 4.4 What can and cannot be hooked
+### 4.4 能注入什么、不能注入什么
 
-Can be hooked: kernel assemblies under `kernel/`, and other mods under `mods/`.
+能注入：`kernel/` 下的内核程序集，以及 `mods/` 下的其他模组。
 
-Cannot be hooked:
+不能注入：
 
-- the main library `NetCraft.dll`
-- the loader `NetCraft.ModLoader.dll`
-- entry assemblies (`NetCraft.Server.Exe.dll`, etc.)
+- 主库 `NetCraft.dll`
+- 加载器 `NetCraft.ModLoader.dll`
+- 入口程序集（`NetCraft.Server.Exe.dll` 等）
 
-Every hook's `target` must be findable in the kernel or in some mod assembly, otherwise assembly reports "the injection target is not in any known assembly". Note that **a namespace does not imply an assembly** — `NetCraft.Game.Server.DedicatedServer` actually lives in `NetCraft.Server.dll`; the loader looks it up by an index built from metadata tables, so just write the full name.
+每个 hook 的 `target` 必须能在内核或某个模组程序集中找到，否则组装会报「注入目标不在任何已知程序集中」。注意**命名空间不等于程序集** —— `NetCraft.Game.Server.DedicatedServer` 实际上住在 `NetCraft.Server.dll` 里；加载器用元数据表构建的索引来查找，所以把全名写对即可。
 
-Mod injection of mods follows the same system: the target mod is rewritten **the moment it is itself loaded**, regardless of the order in `mods/`. Cyclic rules (A injects B and B injects A) report "cyclic loading" at load time; such rules have no solution at the IL rewriting level, so just remove one of them.
+模组注入模组遵循同一套体系：目标模组在**它自己被加载的那一刻**被改写，与 `mods/` 中的顺序无关。循环规则（A 注入 B 且 B 注入 A）会在加载时报「循环加载」；这类规则在 IL 改写层面无解，去掉其中一条即可。
 
-Note the injected mod **cannot be your own mod** — self-injection also counts as a cycle.
+注意被注入的模组**不能是你自己的模组** —— 自我注入同样算循环。
 
-### 4.5 Deployment
+### 4.5 部署
 
-Copy the compiled dll into the output directory's `mods/` (top level, no subdirectory recursion) and restart the process.
+把编译好的 dll 复制到输出目录的 `mods/`（顶层，不递归子目录）并重启进程。
 
-**This step is already automated by the build**: `DeployModToHosts` in `NetCraft.ModApi.csproj` copies the dll into the `mods/` directory of each host project's output directory after building. The host list is the `ModHostProjects` property; when creating your own host project, just add its name. If no rule takes effect and there is no error at all, first check whether the dll in the host project's `mods/` is stale.
+**这一步已由构建自动化**：`NetCraft.ModApi.csproj` 中的 `DeployModToHosts` 会在构建后把 dll 复制到每个宿主项目输出目录的 `mods/`。宿主列表是 `ModHostProjects` 属性；创建自己的宿主项目时，把它的名字加进去即可。如果没有任何规则生效且毫无报错，先检查宿主项目 `mods/` 里的 dll 是不是旧的。
 
-The startup log prints:
+启动日志会打印：
 
 ```
 Rewrote and preloaded assembly NetCraft.Server
@@ -655,26 +655,26 @@ Mod scan finished: 1 found, injection targets NetCraft.Server,NetCraft.Game runt
 Mod init finished: 1 loaded, 0 skipped
 ```
 
-Troubleshooting order:
+排查顺序：
 
-- No rule takes effect: first check whether the dll in `mods/` is stale (most common).
-- If you do not see `Rewrote and preloaded assembly`, the target assembly was already loaded before the bootstrap, so the rule was written too late.
-- If you see `injection targets` but the target is wrong, it is usually a mistyped `target`; follow [4.4](#44-what-can-and-cannot-be-hooked) to check which assembly the type belongs to.
-- A rule with `environment` set to `client` is silently skipped on the server (a mismatch at the mod level means the whole mod is not loaded); this is expected behavior, not a fault.
+- 没有任何规则生效：先检查 `mods/` 里的 dll 是不是旧的（最常见）。
+- 看不到 `Rewrote and preloaded assembly`：目标程序集在引导之前就已加载，规则写得太晚。
+- 看到 `injection targets` 但目标不对：通常是 `target` 写错了；按 [4.4](#44-能注入什么不能注入什么) 检查类型属于哪个程序集。
+- `environment` 设为 `client` 的规则在服务端会被静默跳过（模组级别不匹配意味着整个模组不加载）；这是预期行为，不是故障。
 
-### 4.6 Third-party dependencies
+### 4.6 第三方依赖
 
-Corresponds to Fabric's Jar-in-Jar.
+对应 Fabric 的 Jar-in-Jar。
 
-Projects created from the template **do not need to worry about this**: libraries added via `dotnet add package` are automatically embedded into the mod dll at build time, and when the loader cannot resolve an assembly it looks through the mod's embedded `.dll` resources.
+从模板创建的项目**不需要操心这个**：通过 `dotnet add package` 添加的库会在构建时自动嵌入模组 dll，加载器解析不到程序集时会翻查模组内嵌的 `.dll` 资源。
 
 ```
 dotnet add package Newtonsoft.Json
 ```
 
-That's all; `ncmod.json` needs no changes.
+就这样；`ncmod.json` 不需要改动。
 
-A hand-written project must copy the `EmbedDependencies` target from the template csproj, or embed it yourself:
+手写项目必须从模板 csproj 复制 `EmbedDependencies` 目标，或者自己嵌入：
 
 ```xml
 <ItemGroup>
@@ -682,21 +682,21 @@ A hand-written project must copy the `EmbedDependencies` target from the templat
 </ItemGroup>
 ```
 
-Dependencies are not written into the manifest; resolution only looks at the mod's embedded `.dll` resources, and it just needs the resource name to match the assembly name.
+依赖不写进清单；解析只看模组内嵌的 `.dll` 资源，只需要资源名与程序集名匹配。
 
-Three notes:
+三点说明：
 
-- **Matching is by assembly name**. The loader compares the requested assembly name: after removing `.dll`, the resource name either equals the assembly name or ends with `.` + the assembly name. So both `MyLib.dll` and the default `MyProject.deps.MyLib.dll` work.
-- **Only the mod's own embedded resources are recognized**. Libraries not embedded cannot be resolved and will not be searched for elsewhere.
-- **Resolution order is kernel first**. `EmbeddedAssemblyLoader` looks among kernel assemblies and embedded sub-libraries first, and only falls back to mods if nothing is found, so mods should not embed assemblies with the same name as kernel ones.
+- **按程序集名匹配**。加载器比较请求的程序集名：去掉 `.dll` 后，资源名要么等于程序集名，要么以 `.` + 程序集名结尾。所以 `MyLib.dll` 和默认的 `MyProject.deps.MyLib.dll` 都可以。
+- **只认模组自己的嵌入资源**。没有嵌入的库解析不到，也不会去别处找。
+- **解析顺序是内核优先**。`EmbeddedAssemblyLoader` 先在内核程序集和内嵌子库中找，找不到才回退到模组，所以模组不应嵌入与内核同名的程序集。
 
-The template's target uses `WithMetadataValue` to filter `.dll` rather than writing `Condition`, because the template engine evaluates `Condition` in `.csproj` at template time, when `%(...)` has no value, and the whole line would be deleted.
+模板的目标用 `WithMetadataValue` 过滤 `.dll` 而不是写 `Condition`，因为模板引擎在模板生成时就会求值 `.csproj` 中的 `Condition`，那时 `%(...)` 还没有值，整行会被删掉。
 
-### 4.7 Icon and display info
+### 4.7 图标与显示信息
 
-Name, description, authors, links, and icon are all written in `ncmod.json`, corresponding to `name` / `description` / `authors` / `contact` / `icon` in vanilla's `fabric.mod.json`.
+名称、描述、作者、链接和图标都写在 `ncmod.json` 中，对应原版 `fabric.mod.json` 里的 `name` / `description` / `authors` / `contact` / `icon`。
 
-**The icon is an embedded resource**, not an external file, using the same resource-naming convention as embedded dependencies:
+**图标是嵌入资源**，不是外部文件，使用与嵌入依赖相同的资源命名约定：
 
 ```xml
 <ItemGroup>
@@ -708,149 +708,149 @@ Name, description, authors, links, and icon are all written in `ncmod.json`, cor
 { "icon": "icon.png" }
 ```
 
-The template already ships an `icon.png` with both places configured; just replace that image. A 64×64 or 128×128 PNG is recommended.
+模板已经自带一个 `icon.png` 且两处都配置好了；替换那张图即可。推荐 64×64 或 128×128 的 PNG。
 
-The icon lookup order is: what the manifest's `icon` points to → an embedded resource named `icon.png` → if neither exists, the UI's default image (a gray question mark).
+图标查找顺序是：清单 `icon` 指向的 → 名为 `icon.png` 的嵌入资源 → 两者都不存在时，UI 的默认图像（一个灰色问号）。
 
-This information is visible on the **MODS** page of the server GUI. On the left is the mod list (small icon + display name + version + status); on the right are the description, credits, links, dependencies, initialization time, and injection rules of the selected one. Mod names in the dependency column are clickable and jump straight to that entry.
+这些信息在服务端 GUI 的 **MODS** 页面上可见。左边是模组列表（小图标 + 显示名 + 版本 + 状态）；右边是选中模组的描述、鸣谢、链接、依赖、初始化时间和注入规则。依赖列中的模组名可点击，直接跳到那一项。
 
-Mods that failed to load or were skipped are also in the list, marked in the status column — when diagnosing "why did my mod not take effect", check this column first.
-
----
-
-## 5. Known limitations
-
-- **Probe signatures may only use BCL types and `object`**, for the reason in 2.2; value-type parameters and return values are exceptions and must keep their real types.
-- **`CallSite` is a replacement**, and the replacement method must restore the original call itself, see 2.3. Private methods cannot be restored and require reflection.
-- **Dlls under `mods/` are deployed automatically by `DeployModToHosts`**; when creating your own host project, remember to add its name to `ModHostProjects`.
-- **Entry assemblies cannot be injected**: if your target and hook fall in an entry assembly, it is ineffective.
-- **The main library and loader cannot be hooked**; this is a design constraint preventing mods from changing the loading process itself.
-- **Mismatched `environment` means the whole mod is not loaded**, not "some rules fail".
-- **Runtime injection requires the native library**: rules using `RuntimeInject` require `lead_hook_native` to be attached at process start, and the loader restarts itself to do so; if the library is not found or the restart fails, this batch of rules is downgraded to a warning and startup is not blocked. For capability boundaries and cost see [2.6](#26-runtime-injection-modifying-already-running-code).
-- **Annotations have fewer fields than the C# API**: `InType` / `InMethod` / `Placement` / `LocalIndex` / `ConstantValue` cannot be written in `[Inject]` (`PatchMode` and `Ordinal` are supported), see [2.1](#21-injection-styles-annotations-or-manifest-pick-one).
-- **Mixins apply only to load-time rewriting**, and members in the source class are moved rather than copied; nested types and generic methods in the source class are outside coverage, and methods mixed in with an interface are marked virtual. See [2.8](#28-mixins-adding-members-to-a-target-type).
-- When testing and debugging, if language tables or model resources are used, an `assets` directory (extracted from the vanilla jar) is required, otherwise the related features degrade to translation keys or placeholder textures.
+加载失败或被跳过的模组也在列表里，状态列会标出 —— 诊断「我的模组为什么没生效」时，先看这一列。
 
 ---
 
-## 6. Known behaviors
+## 5. 已知限制
 
-This section is a record of observed behavior, not a specification.
+- **探针签名只能使用 BCL 类型和 `object`**，原因见 2.2；值类型参数和返回值是例外，必须保留真实类型。
+- **`CallSite` 是替换**，替换方法必须自己恢复原调用，见 2.3。私有方法无法恢复，需要反射。
+- **`mods/` 下的 dll 由 `DeployModToHosts` 自动部署**；创建自己的宿主项目时，记得把它的名字加进 `ModHostProjects`。
+- **入口程序集不能被注入**：如果你的目标和 hook 落在入口程序集里，那它不生效。
+- **主库和加载器不能被注入**；这是防止模组改变加载过程本身的设计约束。
+- **`environment` 不匹配意味着整个模组不加载**，而不是「部分规则失败」。
+- **运行时注入需要原生库**：使用 `RuntimeInject` 的规则要求进程启动时挂上 `lead_hook_native`，加载器为此会重启自己；如果找不到这个库或重启失败，这批规则降级为警告，不阻断启动。能力边界和代价见 [2.6](#26-运行时注入修改已在运行的代码)。
+- **注解的字段比 C# API 少**：`InType` / `InMethod` / `Placement` / `LocalIndex` / `ConstantValue` 无法写进 `[Inject]`（`PatchMode` 和 `Ordinal` 支持），见 [2.1](#21-注入风格注解或清单二选一)。
+- **Mixin 只适用于加载时改写**，源类中的成员是移动而非复制；源类中的嵌套类型和泛型方法不在覆盖范围内，带接口混入的方法会被标记为虚方法。见 [2.8](#28-mixin给目标类型增加成员)。
+- 测试和调试时，如果用到语言表或模型资源，需要一个 `assets` 目录（从原版 jar 中提取），否则相关功能会退化为翻译键或占位贴图。
 
-### 6.1 Mod dependency + injecting the depended-on mod
+---
 
-**Scenario**: b depends on a and also injects a.
+## 6. 已知行为
 
-**Conclusion**: it works and does not form a cycle.
+本节是对观察到的行为的记录，不是规范。
 
-The chain has three steps:
+### 6.1 模组依赖 + 注入被依赖的模组
 
-1. The rule table is built purely by reading PE metadata, without loading any assembly. The rule "b injects a" requires neither a nor b to be present.
-2. `PreloadReplacers` loads all replacement classes (including b) before `ModManager`, at which point a is not loaded yet. `LoadFromStream` reads metadata only and does not JIT method bodies, so b's reference to a is lazy at this moment and loading does not fail.
-3. `ModManager` then topologically sorts by `AssemblyRef`, with a before b. When rewriting a, the replacement class b is already in `Default`, so the type is fetched directly and one `AssemblyRef` pointing to b is added to a's metadata. **a does not need to know b exists at all.**
+**场景**：b 依赖 a 且同时注入 a。
 
-**Hard requirement**: when referencing the injected mod in csproj, you must write `Private="false"`. By default it copies `a.dll` into the output directory, which is then embedded into `b.dll` by `EmbedDependencies` as an embedded dependency, and at runtime `ModLibs` resolving `a` picks up the second copy, causing type identity checks between the two to fail.
+**结论**：可行，且不构成循环。
 
-**Verification case**: two template projects `NetCraft.Test1` (a) and `NetCraft.Test2` (b); a provides `Test1Api.Greet` and calls it in its own `ModEntry.Server`, while b replaces that call site with `Test2Probe.OnGreet` and also calls `Greet` once in b's `ModEntry.Server` as a control. Actual run log:
+这条链有三步：
+
+1. 规则表纯粹靠读取 PE 元数据构建，不加载任何程序集。「b 注入 a」这条规则既不要求 a 在场，也不要求 b 在场。
+2. `PreloadReplacers` 在 `ModManager` 之前加载所有替换类（包括 b），此时 a 还未加载。`LoadFromStream` 只读元数据、不 JIT 方法体，所以此刻 b 对 a 的引用是惰性的，加载不会失败。
+3. `ModManager` 随后按 `AssemblyRef` 做拓扑排序，a 在 b 之前。改写 a 时，替换类 b 已经在 `Default` 中，所以直接取到类型，并向 a 的元数据添加一个指向 b 的 `AssemblyRef`。**a 根本不需要知道 b 的存在。**
+
+**硬性要求**：在 csproj 中引用被注入的模组时，必须写 `Private="false"`。默认情况下它会把 `a.dll` 复制到输出目录，随后被 `EmbedDependencies` 作为嵌入依赖嵌进 `b.dll`，运行时 `ModLibs` 解析 `a` 会取到第二份副本，导致两者之间的类型标识检查失败。
+
+**验证用例**：两个模板项目 `NetCraft.Test1`（a）和 `NetCraft.Test2`（b）；a 提供 `Test1Api.Greet` 并在自己的 `ModEntry.Server` 中调用它，b 把该调用点替换为 `Test2Probe.OnGreet`，同时也在 b 的 `ModEntry.Server` 中调用一次 `Greet` 作为对照。实际运行日志：
 
 ```
 Mod netcraft.test2 injects NetCraft.Test1!NetCraft.Test1.Test1Api::Greet replaced by NetCraft.Test2.Test2Probe::OnGreet [CallSite/ILRewrite]
 Mod scan finished: 2 found, injection targets NetCraft.Server,NetCraft.Game,NetCraft.Storage,NetCraft.Test1 runtime
-Test1 internal greeting: Test2-rewritten greeting self    ← injection took effect
-Test2 internal greeting: Test1 original greeting test2    ← control group: the rule only rewrites the target assembly, so b's own internal call site is untouched
+Test1 internal greeting: Test2-rewritten greeting self    ← 注入生效
+Test2 internal greeting: Test1 original greeting test2    ← 对照组：规则只改写目标程序集，所以 b 自己内部的调用点不受影响
 ```
 
-Dependencies derive order only from `AssemblyRef` and carry no version constraint. To constrain versions, declare them in the manifest's `depends`, see [4.2](#42-ncmodjson-fields).
+依赖只从 `AssemblyRef` 推导顺序，不带版本约束。要约束版本，在清单的 `depends` 中声明，见 [4.2](#42-ncmodjson-字段)。
 
-### 6.2 Annotation injection
+### 6.2 注解注入
 
-**Scenario**: `[Inject(typeof(X), nameof(X.M))]` on the replacement method, with no rule in `ncmod.json`.
+**场景**：替换方法上有 `[Inject(typeof(X), nameof(X.M))]`，`ncmod.json` 中没有规则。
 
-**Conclusion**: it works and needs no manifest declaration. Annotations and the manifest share one source, are merged at assembly, and the annotation wins for the same injection point.
+**结论**：可行，且不需要清单声明。注解和清单同源，在组装时合并，同一个注入点注解胜出。
 
-**Why no declaration is needed**: annotations are just the `CustomAttribute` table in metadata, and the loader already reads the same metadata when scanning mods (manifest, embedded resources, and AssemblyRef — three items), so reading one more table introduces no new loading or timing constraint. The only precondition is that the mod references `NetCraft.ModApi` (the annotations' host).
+**为什么不需要声明**：注解就是元数据里的 `CustomAttribute` 表，而加载器扫描模组时已经在读同样的元数据（清单、嵌入资源和 AssemblyRef —— 三项），多读一张表不会引入新的加载或时机约束。唯一的前提是模组引用了 `NetCraft.ModApi`（注解的宿主）。
 
-**The premise is static reading**: reading annotations must go through `MetadataReader` and **must not use `Assembly.Load` + `GetCustomAttributes`** — the latter pulls up the mod assembly just to read rules, and the rewrite window is gone on the spot.
+**前提是静态读取**：读取注解必须走 `MetadataReader`，**不能用 `Assembly.Load` + `GetCustomAttributes`** —— 后者为了读规则就会拉起模组程序集，改写窗口当场就没了。
 
-**`typeof` does not constitute a type reference**: what `typeof(X)` compiles into the parameter is the type's serialized name (`full name, assembly, Version=…`), which resolves to just a string and does not require `X` to be present. So writing `typeof(injected-mod)` in an annotation does **not** violate the constraint in 2.2 that "a replacement class must not reference the injected mod's types" — a name appearing in metadata and resolving a type at runtime are two different things.
+**`typeof` 不构成类型引用**：`typeof(X)` 编译进参数的是类型的序列化名（`全名, 程序集, Version=…`），它解析出来只是一个字符串，不要求 `X` 在场。所以在注解里写 `typeof(被注入的模组)` **不**违反 2.2 中「替换类不得引用被注入模组的类型」的约束 —— 名字出现在元数据里和运行时解析出类型是两回事。
 
-**Verification case**: `NetCraft.Test2` against two methods of `NetCraft.Test1`; `Greet` goes through the annotation and `Farewell` through the manifest. Both rules are installed and both call sites are replaced:
+**验证用例**：`NetCraft.Test2` 针对 `NetCraft.Test1` 的两个方法；`Greet` 走注解，`Farewell` 走清单。两条规则都装上，两个调用点都被替换：
 
 ```
-Mod netcraft.test2 injects NetCraft.Test1!NetCraft.Test1.Test1Api::Greet replaced by NetCraft.Test2.Test2Probe::OnGreet [CallSite/ILRewrite]        ← annotation
-Mod netcraft.test2 injects NetCraft.Test1!NetCraft.Test1.Test1Api::Farewell replaced by NetCraft.Test2.Test2Probe::OnFarewell [CallSite/ILRewrite]  ← manifest
+Mod netcraft.test2 injects NetCraft.Test1!NetCraft.Test1.Test1Api::Greet replaced by NetCraft.Test2.Test2Probe::OnGreet [CallSite/ILRewrite]        ← 注解
+Mod netcraft.test2 injects NetCraft.Test1!NetCraft.Test1.Test1Api::Farewell replaced by NetCraft.Test2.Test2Probe::OnFarewell [CallSite/ILRewrite]  ← 清单
 Test1 internal greeting: Test2-rewritten greeting self
 Test1 internal farewell: Test2-rewritten farewell self
-Test2 internal greeting: Test1 original greeting test2     ← control group: the rule only rewrites the target assembly
-Test2 internal farewell: Test1 original farewell test2     ← control group
+Test2 internal greeting: Test1 original greeting test2     ← 对照组：规则只改写目标程序集
+Test2 internal farewell: Test1 original farewell test2     ← 对照组
 ```
 
-The same case also incidentally verified that the annotation's named parameter (`Environment = "server"`) is resolved too.
+这个用例还顺带验证了注解的命名参数（`Environment = "server"`）也能被解析。
 
-### 6.3 The performance cost of attaching the profiler
+### 6.3 挂载 profiler 的性能代价
 
-**Scenario**: the same pure-computation program (a hundred million modulo-and-accumulate iterations), run once without the profiler and once with it attached (the three `CORECLR_ENABLE_PROFILING` environment variables). Five runs each.
+**场景**：同一个纯计算程序（一亿次取模累加迭代），一次不挂 profiler，一次挂上（三个 `CORECLR_ENABLE_PROFILING` 环境变量）。各跑五次。
 
-**Conclusion**: no difference in steady state; the cost is entirely at startup.
+**结论**：稳态没有差别；代价全在启动。
 
-| | Total process time (5 runs, ms) | In-program computation time |
+| | 进程总时间（5 次，ms） | 程序内计算时间 |
 | --- | --- | --- |
-| without | 306 / 260 / 278 / 253 / 300 | 225 ms |
-| with | 406 / 370 / 340 / 325 / 354 | 193 ms |
+| 不挂 | 306 / 260 / 278 / 253 / 300 | 225 ms |
+| 挂上 | 406 / 370 / 340 / 325 / 354 | 193 ms |
 
-Total time is about 80–110 ms longer. The source is `COR_PRF_DISABLE_ALL_NGEN_IMAGES` — enabling ReJIT requires disabling ReadyToRun images at the same time, so framework code can only go through JIT; the timed loop inside the program is identical once JIT-compiled, showing no difference (the run with the profiler was actually slightly faster, which is noise).
+总时间长了约 80–110 ms。来源是 `COR_PRF_DISABLE_ALL_NGEN_IMAGES` —— 启用 ReJIT 需要同时禁用 ReadyToRun 镜像，所以框架代码只能走 JIT；程序内部的计时循环一旦 JIT 编译就完全相同，看不出差别（挂了 profiler 那次反而略快，属于噪声）。
 
-**A waste also fixed along the way**: the initial implementation subscribed to `COR_PRF_MONITOR_JIT_COMPILATION`, a native callback fired after every method compiles, which we never used. After removing it the event mask changed from `0x80040024` to `0x80040004`; the table above is the data after removal.
+**顺带修掉的一处浪费**：最初的实现订阅了 `COR_PRF_MONITOR_JIT_COMPILATION`，一个每个方法编译后都会触发的原生回调，而我们从未用到。移除后事件掩码从 `0x80040024` 变为 `0x80040004`；上表是移除之后的数据。
 
-**Verification case**: `__hookverify/BenchProbe`.
+**验证用例**：`__hookverify/BenchProbe`。
 
-### 6.4 Two mods injecting the same target
+### 6.4 两个模组注入同一个目标
 
-**Scenario**: two mods each declare a rule that hits the same target method (`MethodBody` form, different replacement methods).
+**场景**：两个模组各自声明一条命中同一目标方法的规则（`MethodBody` 形式，替换方法不同）。
 
-**Conclusion**: no error, no crash; **the first-assembled rule wins and the later one silently fails**.
+**结论**：不报错、不崩溃；**先组装的规则胜出，后者静默失败**。
 
-Both rules enter the rule table — no cross-mod deduplication is done. When rewriting, the **first** entry in the same-key list for `OriginalType::OriginalMethod` is taken; host scoping behaves the same way, with `InType`/`InMethod` being "the first match wins". Which is first depends on assembly order, and assembly order comes from the enumeration order of the mods directory; **there is no priority field and it cannot be controlled by declaring dependencies** (dependencies affect only the order of `Init()`, not the assembly of injection rules).
+两条规则都进入规则表 —— 不做跨模组去重。改写时取 `OriginalType::OriginalMethod` 同键列表中的**第一条**；宿主限定同理，`InType`/`InMethod` 是「第一个匹配到的胜出」。谁在前取决于组装顺序，而组装顺序来自 mods 目录的枚举顺序；**没有优先级字段，也无法通过声明依赖来控制**（依赖只影响 `Init()` 的顺序，不影响注入规则的组装）。
 
-**Runtime injection is first-come, first-served too**: a later registration request is sent normally, but `GetReJITParameters` claims by "module + method" and always matches the first request, so the later registration does not land. Measured after a second injection, the target method's behavior stays at the first result.
+**运行时注入也是先到先得**：后到的注册请求会正常发出，但 `GetReJITParameters` 按「模块 + 方法」认领，总是匹配第一个请求，所以后注册的不会落地。实测第二次注入后，目标方法的行为仍是第一次的结果。
 
-**One bad rule does not affect the others**: problems like the target type not being in any known assembly or a misspelled injection form are recorded in `ModHooks.Errors` at assembly time and that entry is skipped, while other mods' rules are assembled as usual.
+**一条坏规则不影响其他**：目标类型不在任何已知程序集中、注入形式拼错之类的问题会在组装时记录进 `ModHooks.Errors` 并跳过该项，其他模组的规则照常组装。
 
-**Conflicts are recorded**: when assembly detects the same injection point declared by multiple mods, the later-assembled one is written to `ModHooks.Warnings` and output in the startup log as `Mod injection conflict ...`, naming which two mods collided and which one will not take effect. It is a warning, not an error, does not affect loading, and the rule itself remains in the table (just unreachable).
+**冲突会被记录**：当组装检测到同一个注入点被多个模组声明时，后组装的会写进 `ModHooks.Warnings`，并在启动日志中以 `Mod injection conflict ...` 输出，指明是哪两个模组碰撞以及哪一个不会生效。它是警告不是错误，不影响加载，规则本身也留在表里（只是不可达）。
 
-**Runtime injection goes through this check too**: the conflict detection key includes `patchMode`, so one mod writing `ILRewrite` and another writing `RuntimeInject` does not count as a collision (two independent paths, each doing its own thing); only two of the same mode are judged conflicting and warned. Its actual landing is likewise first-come, first-served — `GetReJITParameters` claims by "module + method", matching the first request, so later ones are sent but do not land.
+**运行时注入也走这项检查**：冲突检测键包含 `patchMode`，所以一个模组写 `ILRewrite`、另一个写 `RuntimeInject` 不算碰撞（两条独立路径，各干各的）；只有同模式的两个才判为冲突并警告。它实际的落地同样先到先得 —— `GetReJITParameters` 按「模块 + 方法」认领，匹配第一个请求，所以后来的虽发出但不落地。
 
-**The one hard crash point**: when two mods both patch the same method in `RuntimePatch` mode, the second hits `RuntimeHookEngine`'s duplicate-registration check and throws `InvalidOperationException`, and this path is not caught, so startup fails outright. `RuntimePatch` is on its way out (see [2.6](#26-runtime-injection-modifying-already-running-code)); do not use it in new rules.
+**唯一会硬崩的点**：两个模组都以 `RuntimePatch` 模式补丁同一个方法时，第二个会撞上 `RuntimeHookEngine` 的重复注册检查并抛 `InvalidOperationException`，这条路径没有捕获，启动直接失败。`RuntimePatch` 正在被淘汰（见 [2.6](#26-运行时注入修改已在运行的代码)）；新规则不要用它。
 
-**Verification case**: the `modinjection` module of `NetCraft.Test`, entries `same anchor first mod wins quietly` and `one bad rule does not sink the rest`.
+**验证用例**：`NetCraft.Test` 的 `modinjection` 模块，条目 `same anchor first mod wins quietly` 和 `one bad rule does not sink the rest`。
 
-### 6.5 Not yet verified
+### 6.5 尚未验证
 
-- **Runtime injection working on a real server**: `RuntimeInject` mode has been verified end-to-end in `__hookverify/RuntimeProbe` (after registration the target method's behavior is swapped to the replacement's), and the mod assembly side also has test coverage for routing and downgrade; but no build step currently places `lead_hook_native` into NC's run directory, so running this chain on a real server requires first putting the library in the program root (or pointing to it with `NC_PROFILER_PATH`). This step is not done.
-- **A replacement class referencing the injected mod's types**: by reasoning, at the moment of rewriting a it would resolve a, while a is stuck just before load completion (it is not yet in `Default`, and neither `ModLibs` nor the kernel resolution callback recognizes mod assemblies), so `PrepareMod` is expected to throw and record into `result.Errors`. Not yet actually run. Note 6.2 only proves that **`typeof` in an annotation** is not a reference; **the type appearing in a method signature** is another matter.
+- **运行时注入在真实服务器上可用**：`RuntimeInject` 模式已在 `__hookverify/RuntimeProbe` 中端到端验证（注册后目标方法的行为被换成替换方法的），模组程序集侧也有路由和降级的测试覆盖；但当前没有任何构建步骤把 `lead_hook_native` 放到 NC 的运行目录，所以在真实服务器上跑通这条链需要先把库放进程序根目录（或用 `NC_PROFILER_PATH` 指向它）。这一步尚未完成。
+- **替换类引用被注入模组的类型**：按推理，改写 a 的那一刻它会解析 a，而 a 卡在加载完成之前（它还没进 `Default`，`ModLibs` 和内核解析回调也都不认模组程序集），所以 `PrepareMod` 预期会抛异常并记录进 `result.Errors`。尚未实际运行。注意 6.2 只证明了**注解里的 `typeof`** 不算引用；**类型出现在方法签名里**是另一回事。
 
 ---
 
-## Appendix: HookType overview
+## 附录：HookType 一览
 
-| Form | Effect | Requirement on the replacement method signature |
+| 形式 | 作用 | 对替换方法签名的要求 |
 | --- | --- | --- |
-| `CallSite` | replace call sites to the target method with your method | parameter count matches the called method (instance call +1) |
-| `MethodBody` | replace the entire target method body | matches the replaced method |
-| `NewObj` | replace `new X(...)` | parameter count matches the constructor |
-| `FieldRead` | instrument field reads | by the read type |
-| `FieldWrite` | instrument field writes | by the write type |
-| `TypeCheck` | instrument `isinst` / `castclass` | by the checked type |
-| `Box` | instrument boxing/unboxing | by the element type |
-| `FunctionPointer` | instrument function pointer loads | by the delegate type |
-| `LocalRead` | instrument local variable reads | zero parameters, returns the variable's value |
-| `LocalWrite` | instrument local variable writes | one parameter, receives the written value |
-| `Constant` | instrument constant loads | zero parameters, returns the constant's value |
-| `Probe` | keep the original method body, instrumenting the entry and every exit; with `LabelArgumentIndex`, one argument can be folded into the label | `Begin()` returns long, `End(string, long)` |
-| `Mark` | report once at method entry only, without timing | `void method(string label)` |
+| `CallSite` | 用你的方法替换对目标方法的调用点 | 参数个数与被调用方法一致（实例调用 +1） |
+| `MethodBody` | 替换整个目标方法体 | 与被替换方法一致 |
+| `NewObj` | 替换 `new X(...)` | 参数个数与构造函数一致 |
+| `FieldRead` | 对字段读取插桩 | 按读取的类型 |
+| `FieldWrite` | 对字段写入插桩 | 按写入的类型 |
+| `TypeCheck` | 对 `isinst` / `castclass` 插桩 | 按被检查的类型 |
+| `Box` | 对装箱/拆箱插桩 | 按元素类型 |
+| `FunctionPointer` | 对函数指针加载插桩 | 按委托类型 |
+| `LocalRead` | 对局部变量读取插桩 | 零参数，返回该变量的值 |
+| `LocalWrite` | 对局部变量写入插桩 | 一个参数，接收被写入的值 |
+| `Constant` | 对常量加载插桩 | 零参数，返回该常量的值 |
+| `Probe` | 保留原方法体，对入口和每个出口插桩；配合 `LabelArgumentIndex`，可以把一个参数折进标签 | `Begin()` 返回 long，`End(string, long)` |
+| `Mark` | 只在方法入口上报一次，不计时 | `void method(string label)` |
 
-`Probe` and `Mark` pass only the label text (`Probe` can also include one argument's `ToString()`); they cannot obtain object references. To get actual arguments, use `CallSite`.
+`Probe` 和 `Mark` 只传标签文本（`Probe` 还可以带上一个参数的 `ToString()`）；它们拿不到对象引用。要拿到实际参数，用 `CallSite`。
 
-`InType`/`InMethod`, `Placement`, and `Ordinal` (see [2.4](#24-narrowing-to-one-site-host-scoping-and-placement)) are meaningful only for instruction-level forms: the ten entries in the table above other than `MethodBody`, `Probe`, and `Mark` can choose replace or insert-before/after, and can use `Ordinal` to pick a single occurrence; `MethodBody` always replaces the whole thing, and `Probe`/`Mark` ignore these parameters.
+`InType`/`InMethod`、`Placement` 和 `Ordinal`（见 [2.4](#24-收窄到一个位置宿主限定与放置)）只对指令级形式有意义：上表中除 `MethodBody`、`Probe` 和 `Mark` 之外的十个条目可以选择替换或前插/后插，并可用 `Ordinal` 挑选单次出现；`MethodBody` 总是整段替换，`Probe`/`Mark` 忽略这些参数。
 
-For the three kinds `LocalRead` / `LocalWrite` / `Constant`, the host method is written in `target` rather than a referenced entity, and `localIndex` or `constantValue` is additionally required; see [2.5](#25-in-method-body-anchors-local-variables-and-constants).
+对于 `LocalRead` / `LocalWrite` / `Constant` 这三种，宿主方法填在 `target` 里而不是被引用的实体，并额外需要 `localIndex` 或 `constantValue`；见 [2.5](#25-方法体内部锚点局部变量与常量)。

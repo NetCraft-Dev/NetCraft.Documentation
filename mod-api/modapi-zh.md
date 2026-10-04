@@ -1,26 +1,26 @@
-# NetCraft-ModApi Reference
+# NetCraft-ModApi 参考
 
-`NetCraft.ModApi` is the API surface NetCraft exposes to mods. It has two identities: for you it is an API library; for itself it is an ordinary mod (`id` is `netcraft-modapi`, shipping its own `ncmod.json` and injection probes).
+`NetCraft.ModApi` 是 NetCraft 暴露给模组的 API 表面。它有两重身份：对你而言它是一个 API 库；对它自己而言它就是一个普通模组（`id` 为 `netcraft-modapi`，自带 `ncmod.json` 和注入探针）。
 
-This file grows as the API grows. For architectural background, differences from Fabric, and how to write a mod, see [modding-guide.md](modding-guide.md).
+本文随 API 一起增长。关于架构背景、与 Fabric 的差异以及如何编写模组，见 [modding-guide-zh.md](modding-guide-zh.md)。
 
-- Assembly: `NetCraft.ModApi.dll`
+- 程序集：`NetCraft.ModApi.dll`
 
-- Dependencies: `NetCraft` (the main library), `NetCraft.Game`
+- 依赖：`NetCraft`（主库）、`NetCraft.Game`
 
-The public surface is split into three namespaces:
+公共表面分为三个命名空间：
 
-| Namespace | Contents | Notes |
+| 命名空间 | 内容 | 说明 |
 | --- | --- | --- |
-| `NetCraft.ModApi.Wrapper` | Event and subscription base class `NcEvent<T>`, `Nc*` facades, `Nc*` object handles | Wrapper layer; no kernel types on the public surface |
-| `NetCraft.ModApi.Extension` | `[Inject]` / `[Mixin]` annotations | Extension points; rules bind to kernel class and method names |
-| `NetCraft.ModApi.Internal` | Injection probes | Do not reference directly |
+| `NetCraft.ModApi.Wrapper` | 事件与订阅基类 `NcEvent<T>`、`Nc*` 门面、`Nc*` 对象句柄 | 包装层；公共表面上没有内核类型 |
+| `NetCraft.ModApi.Extension` | `[Inject]` / `[Mixin]` 注解 | 扩展点；规则绑定到内核的类名和方法名 |
+| `NetCraft.ModApi.Internal` | 注入探针 | 不要直接引用 |
 
-The root namespace `NetCraft.ModApi` contains only the entry class `ModApiEntry`. `Wrapper` and `Extension` are two parallel routes; for how to choose, see [modding-guide.md 2.9](modding-guide.md#29-two-routes-wrapper-layer-and-extension-points).
+根命名空间 `NetCraft.ModApi` 只包含入口类 `ModApiEntry`。`Wrapper` 和 `Extension` 是两条并行路线；如何选择见 [modding-guide-zh.md 2.9](modding-guide-zh.md#29-两条路线包装层与扩展点)。
 
 ***
 
-## 1. Quick start
+## 1. 快速开始
 
 ```csharp
 using NetCraft.ModApi.Wrapper;
@@ -29,7 +29,7 @@ public sealed class MyModEntry
 {
     public Task Init()
     {
-        //subscription returns a handle; disposing it unregisters
+        //订阅返回一个句柄；释放它即取消订阅
         var handle = ServerEvents.Tick.Subscribe(args =>
             Log.Info($"tick {args.TickCount}"));
 
@@ -38,7 +38,7 @@ public sealed class MyModEntry
                 builder.Executes(context =>
                 {
                     context.GetSource().SendSuccess("hi");
-                    handle.Dispose();          //you can also do something else with the handle
+                    handle.Dispose();          //你也可以用这个句柄做别的事
                     return 1;
                 })));
 
@@ -47,240 +47,240 @@ public sealed class MyModEntry
 }
 ```
 
-In `ncmod.json`, point `entry` at this class and leave `hooks` empty — the events below are all provided by ModApi's own probes.
+在 `ncmod.json` 中把 `entry` 指向这个类，并让 `hooks` 留空 —— 下面这些事件全部由 ModApi 自己的探针提供。
 
 ***
 
-## 2. Events
+## 2. 事件
 
-All events live under `NetCraft.ModApi.Wrapper`; after `using NetCraft.ModApi.Wrapper;` they are available.
+所有事件都在 `NetCraft.ModApi.Wrapper` 下；写了 `using NetCraft.ModApi.Wrapper;` 后即可使用。
 
-### 2.1 Summary table
+### 2.1 汇总表
 
-| Event                           | Args type              | Trigger                                                   | Side   | ModApi hook point                                        |
+| 事件                           | Args 类型              | 触发时机                                                   | 侧   | ModApi 注入点                                        |
 | ------------------------------- | ---------------------- | --------------------------------------------------------- | ------ | -------------------------------------------------------- |
-| `ServerEvents.Tick`             | `ServerTickArgs`       | every tick of the server main loop                        | server | `DedicatedServer::Tick` (Mark)                           |
-| `ServerEvents.Started`          | `ServerPhaseArgs`      | main loop started, after `Done (x.xxxs)!` is printed      | server | `MinecraftServer::Run` (Mark)                            |
-| `ServerEvents.Stopping`         | `ServerPhaseArgs`      | server begins shutting down; players are about to be disconnected | server | `DedicatedServer::Stop` (Mark)                    |
-| `ServerEvents.CommandRegister`  | `CommandRegisterArgs`  | all built-in commands have been registered                | server | `EffectCommand::Register` call site (CallSite)           |
-| `ServerEvents.PlayerJoin`       | `PlayerJoinArgs`       | the join packet sequence has been sent                    | server | `PlayerList::PlaceNewPlayer` call site (CallSite)        |
-| `ServerEvents.PlayerLeave`      | `PlayerLeaveArgs`      | player removed from the online list                       | server | `PlayerList::RemovePlayer` call site (CallSite)          |
-| `ServerEvents.PlayerDisconnect` | `PlayerDisconnectArgs` | disconnect packet sent and connection closed              | server | `ServerPlayer::Disconnect` call site (CallSite)          |
-| `ServerEvents.PlayerHurt`       | `PlayerHurtArgs`       | damage actually dealt                                     | server | `PlayerList::HurtPlayer` call site (CallSite)            |
-| `ServerEvents.PlayerDeath`      | `PlayerDeathArgs`      | immediately after health resets to zero                   | server | `PlayerList::RespawnPlayer` call site (CallSite)         |
-| `ServerEvents.PlayerChat`       | `PlayerChatArgs`       | after the chat broadcast                                  | server | `ServerGamePacketListenerImpl::HandleChat` call site (CallSite) |
-| `ServerEvents.ChunkLoaded`      | `ChunkLoadedArgs`      | chunk enters memory for the first time                    | server | `ServerChunkCache::set_ChunkLoaded` assignment site (CallSite) |
-| `ServerEvents.ChunkUnloaded`    | `ChunkUnloadedArgs`    | chunk leaves memory                                       | server | `ServerChunkCache::set_ChunkUnloaded` assignment site (CallSite) |
-| `ServerEvents.ChunkSaved`       | `ChunkSavedArgs`       | snapshot taken before the chunk is written to disk        | server | `ServerChunkCache::set_ChunkSaveSink` assignment site (CallSite) |
-| `ServerEvents.CommandExecuted`  | `CommandExecutedArgs`  | a command finished running; syntax errors and permission denials count too | server | `CommandManager::Execute` (CallSite) |
-| `ServerEvents.LevelTick`        | `LevelTickArgs`        | level tick, once per loaded level per tick                | server | `PersistentServerLevel::Tick` (CallSite)                 |
-| `ServerEvents.SavedDataSaving`  | `SavedDataSavingArgs`  | saved data written to disk, one step later than chunk saving | server | `SavedDataStorage::ScheduleSave` (CallSite)          |
-| `ServerEvents.BlockChanged`     | `BlockChangedArgs`     | block state changed, about to sync to clients             | server | `IBlockUpdateSink::BlockChanged` (CallSite)              |
-| `ServerEvents.BlockBroken`      | `BlockBrokenArgs`      | block broken; player mining and redstone self-destruction both count | server | `ServerBlockUpdates::BreakBlock` (CallSite) |
-| `ServerEvents.ItemDropped`      | `ItemDroppedArgs`      | dropped item entity spawned, including block-break drops and cooking products | server | `ServerBlockUpdates::SpawnDrop` (CallSite) |
-| `NetworkEvents.PacketReceived`  | `PacketReceivedArgs`   | every inbound packet queued to a handler, including handshake and status phases | both   | `PacketProcessor::ScheduleIfPossible` and `HandleNow` (CallSite) |
-| `ClientEvents.Tick`             | `ClientTickArgs`       | every tick of the client main loop                        | client | `MinecraftClient::Tick` (Mark)                           |
+| `ServerEvents.Tick`             | `ServerTickArgs`       | 服务端主循环的每个 tick                        | 服务端 | `DedicatedServer::Tick` (Mark)                           |
+| `ServerEvents.Started`          | `ServerPhaseArgs`      | 主循环已启动，在打印 `Done (x.xxxs)!` 之后      | 服务端 | `MinecraftServer::Run` (Mark)                            |
+| `ServerEvents.Stopping`         | `ServerPhaseArgs`      | 服务端开始关闭；玩家即将被断开连接 | 服务端 | `DedicatedServer::Stop` (Mark)                    |
+| `ServerEvents.CommandRegister`  | `CommandRegisterArgs`  | 所有内置命令都已注册完成                | 服务端 | `EffectCommand::Register` call site (CallSite)           |
+| `ServerEvents.PlayerJoin`       | `PlayerJoinArgs`       | 加入封包序列已发送                    | 服务端 | `PlayerList::PlaceNewPlayer` call site (CallSite)        |
+| `ServerEvents.PlayerLeave`      | `PlayerLeaveArgs`      | 玩家从在线列表中被移除                       | 服务端 | `PlayerList::RemovePlayer` call site (CallSite)          |
+| `ServerEvents.PlayerDisconnect` | `PlayerDisconnectArgs` | 断开连接封包已发送且连接已关闭              | 服务端 | `ServerPlayer::Disconnect` call site (CallSite)          |
+| `ServerEvents.PlayerHurt`       | `PlayerHurtArgs`       | 伤害被实际结算                                     | 服务端 | `PlayerList::HurtPlayer` call site (CallSite)            |
+| `ServerEvents.PlayerDeath`      | `PlayerDeathArgs`      | 生命值归零后立即触发                   | 服务端 | `PlayerList::RespawnPlayer` call site (CallSite)         |
+| `ServerEvents.PlayerChat`       | `PlayerChatArgs`       | 聊天广播之后                                  | 服务端 | `ServerGamePacketListenerImpl::HandleChat` call site (CallSite) |
+| `ServerEvents.ChunkLoaded`      | `ChunkLoadedArgs`      | 区块首次进入内存                    | 服务端 | `ServerChunkCache::set_ChunkLoaded` assignment site (CallSite) |
+| `ServerEvents.ChunkUnloaded`    | `ChunkUnloadedArgs`    | 区块离开内存                                       | 服务端 | `ServerChunkCache::set_ChunkUnloaded` assignment site (CallSite) |
+| `ServerEvents.ChunkSaved`       | `ChunkSavedArgs`       | 区块写入磁盘前拍摄快照        | 服务端 | `ServerChunkCache::set_ChunkSaveSink` assignment site (CallSite) |
+| `ServerEvents.CommandExecuted`  | `CommandExecutedArgs`  | 一条命令运行结束；语法错误和权限拒绝也算 | 服务端 | `CommandManager::Execute` (CallSite) |
+| `ServerEvents.LevelTick`        | `LevelTickArgs`        | 世界 tick，每个 tick 对每个已加载世界各一次                | 服务端 | `PersistentServerLevel::Tick` (CallSite)                 |
+| `ServerEvents.SavedDataSaving`  | `SavedDataSavingArgs`  | 存档数据写入磁盘，比区块保存晚一步 | 服务端 | `SavedDataStorage::ScheduleSave` (CallSite)          |
+| `ServerEvents.BlockChanged`     | `BlockChangedArgs`     | 方块状态改变，即将同步给客户端             | 服务端 | `IBlockUpdateSink::BlockChanged` (CallSite)              |
+| `ServerEvents.BlockBroken`      | `BlockBrokenArgs`      | 方块被破坏；玩家挖掘和红石自毁都算 | 服务端 | `ServerBlockUpdates::BreakBlock` (CallSite) |
+| `ServerEvents.ItemDropped`      | `ItemDroppedArgs`      | 掉落物实体已生成，包括破坏方块的掉落物和烹饪产物 | 服务端 | `ServerBlockUpdates::SpawnDrop` (CallSite) |
+| `NetworkEvents.PacketReceived`  | `PacketReceivedArgs`   | 每个入站封包被排入处理器，包括握手和状态阶段 | 两侧   | `PacketProcessor::ScheduleIfPossible` and `HandleNow` (CallSite) |
+| `ClientEvents.Tick`             | `ClientTickArgs`       | 客户端主循环的每个 tick                        | 客户端 | `MinecraftClient::Tick` (Mark)                           |
 
-Ordering of player events: death is nested inside the hurt flow, so `PlayerDeath` precedes the corresponding `PlayerHurt`; `PlayerLeave` and `PlayerDisconnect` are two different things — the former means removal from the online list (even after `/kick` it only fires once the connection drops), the latter means the connection drop itself, and the two are not guaranteed to appear in pairs.
+玩家事件的顺序：死亡嵌套在受伤流程内部，所以 `PlayerDeath` 先于对应的 `PlayerHurt`；`PlayerLeave` 和 `PlayerDisconnect` 是两回事 —— 前者表示从在线列表移除（即便 `/kick` 也要等到连接断开才触发），后者表示连接断开本身，两者不保证成对出现。
 
-### 2.2 Subscribing and unregistering
+### 2.2 订阅与取消订阅
 
 ```csharp
 IDisposable Subscribe(Action<T> handler)
 ```
 
-- Subscribing to the same event multiple times delivers notifications in subscription order.
+- 对同一个事件多次订阅，通知按订阅顺序送达。
 
-- Dispatch takes a snapshot of the callback list, so subscribing or unregistering from inside a callback does not affect the current dispatch.
+- 派发时对回调列表拍快照，因此在回调内部订阅或取消订阅不影响当前这次派发。
 
-- Without unregistering it stays effective forever; mods provide no unload mechanism, so manual unregistration is usually unnecessary.
+- 不取消订阅就永远有效；模组没有卸载机制，所以通常不需要手动取消订阅。
 
-### 2.3 Args types
+### 2.3 Args 类型
 
 **`ServerTickArgs`**
 
-| Property    | Type   | Notes                                |
+| 属性    | 类型   | 说明                                |
 | ----------- | ------ | ------------------------------------ |
-| `TickCount` | `long` | tick count since this launch, starting at 1 |
+| `TickCount` | `long` | 自本次启动以来的 tick 计数，从 1 开始 |
 
-Note this is counted by ModApi itself, not the kernel's `TickCount`.
+注意这是 ModApi 自己计数的，不是内核的 `TickCount`。
 
 **`ClientTickArgs`**
 
-| Property    | Type   | Notes                           |
+| 属性    | 类型   | 说明                           |
 | ----------- | ------ | ------------------------------- |
-| `TickCount` | `long` | same as above, counted independently on the client side |
+| `TickCount` | `long` | 同上，在客户端侧独立计数 |
 
 **`ServerPhaseArgs`**
 
-| Property | Type     | Notes                        |
+| 属性 | 类型     | 说明                        |
 | -------- | -------- | ---------------------------- |
-| `Phase`  | `string` | phase name, `started` or `stopping` |
+| `Phase`  | `string` | 阶段名，`started` 或 `stopping` |
 
-The field duplicates the event itself; it is kept so logging can use one uniform format.
+该字段与事件本身重复；保留它是为了让日志能使用统一的格式。
 
 **`CommandRegisterArgs`**
 
-| Member                               | Type                                    | Notes            |
+| 成员                               | 类型                                    | 说明            |
 | ------------------------------------ | --------------------------------------- | ---------------- |
-| `Dispatcher`                         | `CommandDispatcher<CommandSourceStack>` | the kernel's command dispatcher |
-| `Register(name, description, build)` | method                                  | register a command and record it in the ledger, see 3.1 |
+| `Dispatcher`                         | `CommandDispatcher<CommandSourceStack>` | 内核的命令派发器 |
+| `Register(name, description, build)` | method                                  | 注册一条命令并记入账本，见 3.1 |
 
 **`PlayerJoinArgs`**
 
-| Property      | Type           | Notes                                          |
+| 属性      | 类型           | 说明                                          |
 | ------------- | -------------- | ---------------------------------------------- |
-| `Player`      | `ServerPlayer` | the player who just joined; join packets already sent, state is safe to read |
-| `ProfileName` | `string`       | player name                                    |
+| `Player`      | `ServerPlayer` | 刚加入的玩家；加入封包已发送，状态可以安全读取 |
+| `ProfileName` | `string`       | 玩家名                                    |
 
 **`PlayerLeaveArgs`**
 
-| Property  | Type           | Notes                                 |
+| 属性  | 类型           | 说明                                 |
 | --------- | -------------- | ------------------------------------- |
-| `Player`  | `ServerPlayer` | the leaving player, no longer in the online list at this point |
-| `Removed` | `bool`         | whether actually removed; `false` on repeated removal |
+| `Player`  | `ServerPlayer` | 正在离开的玩家，此时已不在在线列表中 |
+| `Removed` | `bool`         | 是否真的被移除；重复移除时为 `false` |
 
 **`PlayerDisconnectArgs`**
 
-| Property | Type           | Notes                                 |
+| 属性 | 类型           | 说明                                 |
 | -------- | -------------- | ------------------------------------- |
-| `Player` | `ServerPlayer` | the disconnected player               |
-| `Reason` | `string`       | disconnect reason; plain text when given as a component |
+| `Player` | `ServerPlayer` | 已断开连接的玩家               |
+| `Reason` | `string`       | 断开原因；以组件形式给出时是纯文本 |
 
-The disconnect packet has been sent and the connection closed; sending packets to this player now has no effect.
+断开连接封包已发送且连接已关闭；此时给该玩家发封包不会有任何效果。
 
 **`PlayerHurtArgs`**
 
-| Property   | Type            | Notes                                        |
+| 属性   | 类型            | 说明                                        |
 | ---------- | --------------- | -------------------------------------------- |
-| `Player`   | `ServerPlayer`  | the player who was hurt                      |
-| `Attacker` | `ServerPlayer?` | the player who dealt the damage; `null` for environmental and command damage |
-| `Amount`   | `float`         | damage amount this time                      |
+| `Player`   | `ServerPlayer`  | 被伤害的玩家                      |
+| `Attacker` | `ServerPlayer?` | 造成伤害的玩家；环境伤害和命令伤害时为 `null` |
+| `Amount`   | `float`         | 本次伤害量                      |
 
-Does not fire during invulnerability frames or after death (the kernel's `Hurt` returns `false`).
+无敌帧期间或死亡后不触发（内核的 `Hurt` 返回 `false`）。
 
 **`PlayerDeathArgs`**
 
-| Property   | Type            | Notes                          |
+| 属性   | 类型            | 说明                          |
 | ---------- | --------------- | ------------------------------ |
-| `Player`   | `ServerPlayer`  | the player who died            |
-| `Attacker` | `ServerPlayer?` | the killer; `null` when there is none |
+| `Player`   | `ServerPlayer`  | 死亡的玩家            |
+| `Attacker` | `ServerPlayer?` | 击杀者；没有时为 `null` |
 
-The kernel resets immediately after health reaches zero, so when the event fires the player is already at full health at the respawn point; the coordinates and drops at the moment of death are not available.
+内核在生命值归零后立即重置，所以事件触发时玩家已经满血在重生点；死亡瞬间的坐标和掉落物拿不到。
 
 **`PlayerChatArgs`**
 
-| Property     | Type     | Notes                |
+| 属性     | 类型     | 说明                |
 | ------------ | -------- | -------------------- |
-| `SenderName` | `string` | sender name          |
-| `Message`    | `string` | plain-text message   |
+| `SenderName` | `string` | 发送者名字          |
+| `Message`    | `string` | 纯文本消息   |
 
-This event is a **read-only notification**: the original method has already broadcast the message, so changing `Message` here has no effect.
+这个事件是**只读通知**：原方法已经广播了消息，所以在这里修改 `Message` 没有任何效果。
 
 **`ChunkLoadedArgs`** **/** **`ChunkUnloadedArgs`** **/** **`ChunkSavedArgs`**
 
-The three events share the same args shape:
+这三个事件共用同一种 args 形状：
 
-| Property | Type  | Notes              |
+| 属性 | 类型  | 说明              |
 | -------- | ----- | ------------------ |
-| `X`      | `int` | chunk coordinate X |
-| `Z`      | `int` | chunk coordinate Z |
+| `X`      | `int` | 区块坐标 X |
+| `Z`      | `int` | 区块坐标 Z |
 
-The easiest one to get wrong is `ChunkSaved`: the kernel requires this callback to **take the snapshot synchronously**, while serialization and disk writes are done asynchronously by the kernel itself. So time-consuming work in this callback directly slows down chunk unloading, and destructive operations (removing blocks, changing inventories) should not go here either — it only promises the snapshot moment.
+最容易用错的是 `ChunkSaved`：内核要求这个回调**同步拍摄快照**，而序列化和写盘由内核自己异步完成。所以在这个回调里做耗时工作会直接拖慢区块卸载，破坏性操作（移除方块、改动容器）也不该放这里 —— 它只承诺快照这一刻。
 
-When `ChunkUnloaded` fires the block entities have already been cleaned up along with the chunk; if you want to read blocks, use `ChunkSaved` (which cannot access blocks either) or an earlier point.
+`ChunkUnloaded` 触发时方块实体已经随区块一起清理完毕；如果你想读方块，用 `ChunkSaved`（它同样访问不到方块）或更早的时点。
 
 **`CommandExecutedArgs`**
 
-| Property  | Type                   | Notes                                 |
+| 属性  | 类型                   | 说明                                 |
 | --------- | ---------------------- | ------------------------------------- |
-| `Command` | `string`               | raw command text; chat commands carry no leading slash |
-| `Result`  | `int`                  | command return value; 0 means failure or denial |
-| `Source`  | `CommandSourceStack?`  | command source; `null` on the player-overload path |
-| `Player`  | `ServerPlayer?`        | the player who issued the command; `null` when issued from the console |
+| `Command` | `string`               | 原始命令文本；聊天命令不带前导斜杠 |
+| `Result`  | `int`                  | 命令返回值；0 表示失败或被拒绝 |
+| `Source`  | `CommandSourceStack?`  | 命令来源；走玩家重载路径时为 `null` |
+| `Player`  | `ServerPlayer?`        | 发出命令的玩家；从控制台发出时为 `null` |
 
-The event fires **after** the command finishes; it cannot change execution. Syntax errors and permission denials also come through here; use `Result` to tell them apart. Commands a player sends from the chat bar go through the `Execute(ServerPlayer, string)` overload, where the kernel builds the command source internally, so in that case `Source` is `null` and only `Player` is set.
+事件在命令结束**之后**触发，无法改变执行。语法错误和权限拒绝也会走这里；用 `Result` 区分它们。玩家从聊天栏发出的命令走 `Execute(ServerPlayer, string)` 重载，此时内核在内部构造命令来源，所以这种情况下 `Source` 为 `null`，只设置 `Player`。
 
 **`LevelTickArgs`**
 
-| Property       | Type                    | Notes                                        |
+| 属性       | 类型                    | 说明                                        |
 | -------------- | ----------------------- | -------------------------------------------- |
-| `Level`        | `NcLevel`               | the level advanced this tick                 |
-| `RunsNormally` | `bool`                  | whether it advanced normally; `false` during `/tick freeze` |
+| `Level`        | `NcLevel`               | 本 tick 推进的世界                 |
+| `RunsNormally` | `bool`                  | 是否正常推进；`/tick freeze` 期间为 `false` |
 
-Fires once per loaded level per tick, so a multi-level world receives several per tick. The trigger point is after the level tick **has completed**; it is an observation point, not an interception point.
+每个 tick 对每个已加载世界触发一次，所以一个多世界的存档每 tick 会收到多次。触发点在世界 tick **已完成**之后；它是观察点，不是拦截点。
 
 **`SavedDataSavingArgs`**
 
-| Property  | Type                | Notes                       |
+| 属性  | 类型                | 说明                       |
 | --------- | ------------------- | --------------------------- |
-| `Storage` | `SavedDataStorage`  | the saved-data table being persisted |
+| `Storage` | `SavedDataStorage`  | 正在持久化的存档数据表 |
 
-This is a different path from `ServerEvents.ChunkSaved`: the chunk one only takes a snapshot and writes asynchronously, whereas this one fires after a synchronous write completes. World clock, game rules, and world border data go through it.
+这与 `ServerEvents.ChunkSaved` 是不同路径：区块那个只拍快照并异步写入，而这个在同步写完之后触发。世界时钟、游戏规则和世界边界数据都走这里。
 
 **`BlockChangedArgs`**
 
-| Property | Type         | Notes                       |
+| 属性 | 类型         | 说明                       |
 | -------- | ------------ | --------------------------- |
-| `Pos`    | `BlockPos`   | position of the changed block |
-| `State`  | `BlockState` | block state after the change  |
+| `Pos`    | `BlockPos`   | 被改变方块的位置 |
+| `State`  | `BlockState` | 改变后的方块状态  |
 
-The state has already been written to the chunk and is about to sync to clients, so the change itself cannot be modified here. Redstone components changing their own state in behavior callbacks also exit through this path; it is high-frequency, so do not do time-consuming work in the callback.
+状态已经写入区块，即将同步给客户端，所以无法在这里修改这次改变本身。红石元件在行为回调中改变自身状态也走这条路径；频率很高，不要在回调里做耗时工作。
 
 **`BlockBrokenArgs`**
 
-| Property | Type            | Notes                                      |
+| 属性 | 类型            | 说明                                      |
 | -------- | --------------- | ------------------------------------------ |
-| `Pos`    | `BlockPos`      | position of the broken block                |
-| `Player` | `ServerPlayer?` | the breaker; `null` for non-player causes such as redstone |
+| `Pos`    | `BlockPos`      | 被破坏方块的位置                |
+| `Player` | `ServerPlayer?` | 破坏者；红石等非玩家原因时为 `null` |
 
-Fires only when the block is actually replaced; empty positions and rejected breaks do not trigger it. Break effects and drops have already been handled, so what you read in the event is the result.
+只在方块被实际替换时触发；空位置和被拒绝的破坏不触发。破坏效果和掉落物已经处理完毕，所以你在事件里读到的是结果。
 
 **`ItemDroppedArgs`**
 
-| Property | Type        | Notes                   |
+| 属性 | 类型        | 说明                   |
 | -------- | ----------- | ----------------------- |
-| `Pos`    | `BlockPos`  | where the dropped item appeared |
-| `Stack`  | `ItemStack` | the dropped item stack   |
+| `Pos`    | `BlockPos`  | 掉落物出现的位置 |
+| `Stack`  | `ItemStack` | 掉落物物品堆   |
 
-Block-break drops and campfire cooking products both go through here. An empty item stack spawns no entity, so there is no event.
+破坏方块的掉落物和营火烹饪产物都走这里。空的物品堆不会生成实体，所以没有事件。
 
 **`PacketReceivedArgs`**
 
-| Property        | Type     | Notes                    |
+| 属性        | 类型     | 说明                    |
 | --------------- | -------- | ------------------------ |
-| `Listener`      | `object` | the listener receiving this packet |
-| `Packet`        | `object` | the packet object itself  |
-| `IsServerbound` | `bool`   | whether it is a serverbound packet |
+| `Listener`      | `object` | 接收该封包的监听器 |
+| `Packet`        | `object` | 封包对象本身  |
+| `IsServerbound` | `bool`   | 是否为服务端绑定（serverbound）封包 |
 
-Fires for every inbound packet, covering all four phases: handshake, status, configuration, and play. Movement packets arrive several times per tick, so do not do time-consuming work in the callback. The packet is already decoded into an object but has not entered the business layer; to distinguish types, inspect `Packet` yourself. Outbound packets are outside this event's scope.
+每个入站封包都会触发，覆盖全部四个阶段：握手、状态、配置和游戏。移动封包每 tick 会到好几次，不要在回调里做耗时工作。封包已经解码成对象但还没进入业务层；要区分类型，自己检查 `Packet`。出站封包不在这个事件的范围内。
 
 ***
 
-## 3. Extension points
+## 3. 扩展点
 
-### 3.1 Command registration
+### 3.1 命令注册
 
-The timing is `ServerEvents.CommandRegister`. Do not cache this event's args; the internal command tree is built only once at startup.
+时机是 `ServerEvents.CommandRegister`。不要缓存这个事件的 args；内部命令树只在启动时构建一次。
 
 ```csharp
 public void Register(
-    string name,                                          //command literal, without the slash
-    string description,                                   //one-line description, shown in the /ncmapi ledger
-    Action<LiteralArgumentBuilder<CommandSourceStack>> build);   //attach arguments and the executor
+    string name,                                          //命令字面量，不带斜杠
+    string description,                                   //一行描述，显示在 /ncmapi 账本中
+    Action<LiteralArgumentBuilder<CommandSourceStack>> build);   //挂载参数和执行器
 ```
 
-The `build` you receive is the kernel's brigadier builder; write arguments, subcommands, and permission predicates the kernel's way:
+你拿到的 `build` 是内核的 brigadier builder；按内核的方式写参数、子命令和权限判定：
 
 ```csharp
 ServerEvents.CommandRegister.Subscribe(args =>
     args.Register("tpall", "teleport all players to the executor", builder =>
         builder
-            .Requires(s => s.HasPermission(2))            //permission predicate
+            .Requires(s => s.HasPermission(2))            //权限判定
             .Executes(context => { /* ... */ return 1; })));
 ```
 
-With arguments:
+带参数时：
 
 ```csharp
 args.Register("heal", "heal the target players", builder =>
@@ -290,22 +290,22 @@ args.Register("heal", "heal the target players", builder =>
             .Executes(context =>
             {
                 foreach (var player in EntityArgument.GetPlayers(context, "targets"))
-                    player.Heal(20f);                     //illustrative
+                    player.Heal(20f);                     //示意
                 return 1;
             })));
 ```
 
-Key points:
+要点：
 
-- Calling `args.Dispatcher.Register(...)` directly also installs a command, but it does not enter the ledger and `/ncmapi` will not show it. Use `args.Register` if you want it listed.
+- 直接调用 `args.Dispatcher.Register(...)` 也能装上命令，但它不进账本，`/ncmapi` 不会显示。想让它出现在列表里就用 `args.Register`。
 
-- Commands have no permission restriction by default; add `.Requires(...)` yourself if needed.
+- 命令默认没有权限限制；需要的话自己加 `.Requires(...)`。
 
-- The behavior at execution time is entirely up to you; ModApi does not intercept it.
+- 执行时的行为完全由你决定；ModApi 不拦截。
 
-### 3.2 Viewing registered commands
+### 3.2 查看已注册的命令
 
-There is a built-in `/ncmapi`, requiring permission level 2:
+内置了一个 `/ncmapi`，需要权限等级 2：
 
 ```
 /ncmapi
@@ -318,124 +318,124 @@ Commands registered via NetCraft-ModApi: 2 total
   /heal <targets>
 ```
 
-Usage lines are computed on the fly from the command tree's node structure: literals are written by name, arguments are wrapped in angle brackets, and intermediate nodes that are themselves executable get their own line too.
+用法行是根据命令树的节点结构即时计算的：字面量按名字写出，参数用尖括号包裹，本身可执行的中间节点也会有自己的一行。
 
 ***
 
-## 4. Server facades
+## 4. 服务端门面
 
-The facades in this chapter all live under `NetCraft.ModApi.Wrapper`; after `using NetCraft.ModApi.Wrapper;` they are available.
+本章的门面都在 `NetCraft.ModApi.Wrapper` 下；写了 `using NetCraft.ModApi.Wrapper;` 后即可使用。
 
-Facades are `Nc*` static classes that gather capabilities scattered across the kernel into a few entry points. The kernel instance is captured by a probe when the main loop starts; when `NcServer.IsAvailable` is false everything below throws — use them only inside event callbacks, not from `Init`.
+门面是把散落在内核各处的能力汇集到少数几个入口点的 `Nc*` 静态类。内核实例会在主循环启动时被探针捕获；当 `NcServer.IsAvailable` 为 false 时下面的一切都会抛异常 —— 只在事件回调里用它们，不要在 `Init` 里用。
 
-| Facade | Purpose |
+| 门面 | 用途 |
 | --- | --- |
-| `NcServer` | server instance, tick rate, commands, entity tracking, player data, game rules, broadcast, command execution |
-| `NcPlayers` | online player queries and operations (kick, teleport, health, game mode, permissions) |
-| `NcWorld` | overworld block read/write and breaking, weather, time, border, clock, sounds, level events; takes `NcLevel` handles to reach other dimensions, coordinates are plain `x y z` ints |
-| `NcRegistries` | built-in registries looked up by name (blocks, items, fluids, effects, biomes, particles, entities, block entities) |
-| `NcRecipes` | recipe queries (grid crafting, stonecutting, cooking; fetch recipes by id) |
-| `NcLists` | lists and config (whitelist, ops, bans, `server.properties`) |
-| `NcStartup` | startup arguments (kernel-unrecognized tokens and name-based subscription) |
+| `NcServer` | 服务端实例、tick 速率、命令、实体追踪、玩家数据、游戏规则、广播、命令执行 |
+| `NcPlayers` | 在线玩家查询与操作（踢出、传送、生命值、游戏模式、权限） |
+| `NcWorld` | 主世界方块读写与破坏、天气、时间、边界、时钟、音效、世界事件；用 `NcLevel` 句柄访问其它维度，坐标是普通的 `x y z` 整数 |
+| `NcRegistries` | 按名字查找内置注册表（方块、物品、流体、状态效果、生物群系、粒子、实体、方块实体） |
+| `NcRecipes` | 配方查询（网格合成、切石、烹饪；按 id 取配方） |
+| `NcLists` | 列表与配置（白名单、管理员、封禁、`server.properties`） |
+| `NcStartup` | 启动参数（内核不认识的 token 和按名字订阅） |
 
-`NcPlayer` is not a static facade but an **object handle**: `NcPlayers.All` / `Find` return it, and `Player` / `Attacker` in player events are also it. Handles are read-only and constructed by probes; mods cannot get the kernel's `ServerPlayer` — the first anchor of "no kernel types on the public surface". The same kernel player always maps to the same handle, cached internally by weak reference and automatically invalidated once the player logs off.
+`NcPlayer` 不是静态门面，而是**对象句柄**：`NcPlayers.All` / `Find` 返回它，玩家事件里的 `Player` / `Attacker` 也是它。句柄只读且由探针构造；模组拿不到内核的 `ServerPlayer` —— 这是「公共表面上没有内核类型」的第一块基石。同一个内核玩家总是映射到同一个句柄，内部用弱引用缓存，玩家一登出就自动失效。
 
-`NcLevel` follows the same shape for levels. `NcWorld.Overworld` / `Nether` / `End` and `NcWorld.Get("minecraft:the_nether")` return it, and `LevelTickArgs.Level` is one too. It carries the dimension id, time, weather, build height, tick count, and chunk force-loading; block operations stay on `NcWorld` and take the handle plus `x y z`. `BlockPos` never shows up, so a mod's dll carries no reference to the kernel level type.
+`NcLevel` 对世界遵循同样的形状。`NcWorld.Overworld` / `Nether` / `End` 和 `NcWorld.Get("minecraft:the_nether")` 返回它，`LevelTickArgs.Level` 也是一个。它携带维度 id、时间、天气、建筑高度、tick 计数和区块强制加载；方块操作留在 `NcWorld` 上，接收句柄加 `x y z`。`BlockPos` 从不出现，所以模组的 dll 不携带对内核世界类型的引用。
 
-### 4.1 Registries
+### 4.1 注册表
 
-`NcRegistries` provides both whole tables and lookups by name. Whole tables are for iteration and tag-based lookup; lookups by name are for getting a single element:
+`NcRegistries` 既提供整张表，也提供按名字查找。整张表用于遍历和基于标签的查找；按名字查找用于获取单个元素：
 
 ```csharp
-var stone = NcRegistries.FindState("minecraft:stone");     //block default state
+var stone = NcRegistries.FindState("minecraft:stone");     //方块的默认状态
 var diamond = NcRegistries.FindItem("minecraft:diamond");
 var over = NcRegistries.FindBiome("minecraft:plains");
 
-//iterate the whole table
+//遍历整张表
 foreach (var id in NcRegistries.Blocks.KeySet)
     Log.Info(id.ToString());
 ```
 
-Registries are assembled gradually during startup, and mods load before assembly completes, so do not cache anything looked up in `Init` — assembly is still ongoing, and a cached value will be a null reference or a stale value. Currently `BuiltInRegistries.BootStrap` is still an empty implementation; each registry is populated separately by its own Bootstrap, and the data-driven ones (biomes, recipes, etc.) have very few entries before data pack loading is wired up.
+注册表在启动过程中逐步组装，而模组在组装完成前就已加载，所以不要在 `Init` 里缓存任何查出来的东西 —— 组装仍在进行，缓存下来的值会是空引用或过期值。目前 `BuiltInRegistries.BootStrap` 还是空实现；每个注册表由各自的 Bootstrap 分别填充，数据驱动的那些（生物群系、配方等）在数据包加载接通之前条目很少。
 
-### 4.2 Recipes
+### 4.2 配方
 
-`NcRecipes` is backed by a recipe table loaded from data packs; `/reload` replaces the whole table, so do not hold a `RecipeHolder` across reloads.
+`NcRecipes` 由一个从数据包加载的配方表支撑；`/reload` 会替换整张表，所以不要在跨重载时持有 `RecipeHolder`。
 
 ```csharp
 if (NcRecipes.IsAvailable)
 {
-    var result = NcRecipes.Craft(input);                    //compute the output for a crafting grid
-    var recipes = NcRecipes.StonecuttingFor(stack);         //stonecutting recipes available for this input
-    var smelting = NcRecipes.CookingFor("smelting", stack); //look up by cooking type
-    var byId = NcRecipes.Find("minecraft:oak_planks");      //fetch a recipe by id
+    var result = NcRecipes.Craft(input);                    //计算合成网格的输出
+    var recipes = NcRecipes.StonecuttingFor(stack);         //该输入可用的切石配方
+    var smelting = NcRecipes.CookingFor("smelting", stack); //按烹饪类型查找
+    var byId = NcRecipes.Find("minecraft:oak_planks");      //按 id 取配方
 }
 ```
 
 ***
 
-## 5. Internals
+## 5. 内部实现
 
-You do not need this section to write mods, but it may help when debugging.
+写模组不需要这一节，但调试时可能有帮助。
 
-### 5.1 Probes
+### 5.1 探针
 
-| Class                                                    | Form        | Responsibility                                              |
+| 类                                                    | 形式        | 职责                                              |
 | -------------------------------------------------------- | ----------- | ----------------------------------------------------------- |
-| `Internal.SignalProbe.OnSignal(string)`                  | Mark ×4     | all "something happened" signals funnel into one method, dispatched to the matching event by `label` |
-| `Internal.CommandProbe.OnCommandsReady(object)`          | CallSite    | replaces the call to `EffectCommand::Register`; after restoring the original call it fires `CommandRegister` |
-| `Internal.PlayerProbe.OnXxx(object, ...)`                | CallSite ×6 | player events, one method per hook point; after restoring the original call it publishes the event |
-| `Internal.LevelProbe.OnChunkXxxAssigned(object, object)` | CallSite ×3 | chunk events, hooked at the assignment sites of `ServerChunkCache`'s three callback properties; a wrapper delegate is layered on before handing control back to the kernel |
-| `Internal.BlockProbe.OnXxx(...)`                         | CallSite ×3 | block events; breaking and drops hook `ServerBlockUpdates`, state changes hook the interface method on `IBlockUpdateSink` |
+| `Internal.SignalProbe.OnSignal(string)`                  | Mark ×4     | 所有「某事发生了」的信号汇聚到一个方法，按 `label` 分发到对应事件 |
+| `Internal.CommandProbe.OnCommandsReady(object)`          | CallSite    | 替换对 `EffectCommand::Register` 的调用；在恢复原调用后触发 `CommandRegister` |
+| `Internal.PlayerProbe.OnXxx(object, ...)`                | CallSite ×6 | 玩家事件，每个注入点一个方法；在恢复原调用后发布事件 |
+| `Internal.LevelProbe.OnChunkXxxAssigned(object, object)` | CallSite ×3 | 区块事件，注入在 `ServerChunkCache` 三个回调属性的赋值点；在把控制权交还内核前叠加一层包装委托 |
+| `Internal.BlockProbe.OnXxx(...)`                         | CallSite ×3 | 方块事件；破坏和掉落注入 `ServerBlockUpdates`，状态改变注入 `IBlockUpdateSink` 上的接口方法 |
 
-`SignalProbe`'s signature takes only `string`, and the parameters of `CommandProbe`, `PlayerProbe`, and `LevelProbe` are declared as `object` — this is deliberate: during assembly `Lead.Hook` resolves the replacement method's signature, and once a kernel type appears in it, resolving it pulls up the kernel assembly early and injection misses its window. Kernel types appear only inside method bodies, by which time the code is already running.
+`SignalProbe` 的签名只接收 `string`，而 `CommandProbe`、`PlayerProbe` 和 `LevelProbe` 的参数声明为 `object` —— 这是刻意的：组装期间 `Lead.Hook` 会解析替换方法的签名，一旦其中出现内核类型，解析它就会提前拉起内核程序集，注入便错过窗口。内核类型只出现在方法体内部，那时代码已经在运行了。
 
-The only things that cannot be `object` in a signature are value-type parameters and return values: `object` is a reference on the stack while `float`/`bool` are values, and a mismatch is invalid IL. So `PlayerProbe.OnHurtPlayer` keeps `float` for the damage amount, and `OnRemovePlayer` and `OnHurtPlayer` keep `bool` return values.
+签名中唯一不能用 `object` 的是值类型参数和返回值：`object` 在栈上是引用，而 `float`/`bool` 是值，不匹配就是非法 IL。所以 `PlayerProbe.OnHurtPlayer` 的伤害量保留 `float`，`OnRemovePlayer` 和 `OnHurtPlayer` 保留 `bool` 返回值。
 
-`BlockProbe` is an extension of this constraint: block position and state are the two value types `BlockPos`/`BlockState`, which can only be written into the signature as themselves. These two types come from `NetCraft.Primitives` and `NetCraft.Registry`, neither of which is on the injection list, so resolving them during assembly does not pull up the assemblies to be rewritten early.
+`BlockProbe` 是这条约束的延伸：方块位置和状态是两个值类型 `BlockPos`/`BlockState`，只能以它们本身写进签名。这两个类型来自 `NetCraft.Primitives` 和 `NetCraft.Registry`，两者都不在注入名单上，所以组装期间解析它们不会提前拉起待改写的程序集。
 
-### 5.2 Hook point list
+### 5.2 注入点清单
 
-ModApi's `ncmod.json` contains twenty-four rules, matching the table in 2.1 one-to-one. To change a hook point or add a rule, edit this file; after editing, rebuild (it is an embedded resource) and put the resulting dll back into `mods/` — the latter is already done automatically by `DeployModToHosts` in `NetCraft.ModApi.csproj`, and missing it manifests as the rules not taking effect at all.
+ModApi 的 `ncmod.json` 包含二十四条规则，与 2.1 中的表格一一对应。要改动注入点或新增规则，就编辑这个文件；改完后重新构建（它是嵌入资源），再把生成的 dll 放回 `mods/` —— 后者已由 `NetCraft.ModApi.csproj` 中的 `DeployModToHosts` 自动完成，漏掉它表现为规则完全不生效。
 
-`CommandManager::Execute` has two overloads that share one rule. `Lead.Hook`'s CallSite matches call sites by "type + method name", not by parameter list, and both overloads take two parameters, so the probe can take `object` for the first parameter and dispatch by the real type.
+`CommandManager::Execute` 有两个重载共用一条规则。`Lead.Hook` 的 CallSite 按「类型 + 方法名」匹配调用点，而不是按参数列表，两个重载都接收两个参数，所以探针可以把第一个参数取为 `object`，再按真实类型分发。
 
-The two `PacketProcessor` rules are complementary: play-phase packets go through `ScheduleIfPossible` into the main-thread queue, while handshake and status phases go through `HandleNow` for immediate handling; any given packet passes through only one of them. Hooking only the former misses the handshake and status phases — which happen to be the easiest to probe with scripts, so during debugging this is easily misread as "the rule did not take effect".
+两条 `PacketProcessor` 规则是互补的：游戏阶段的封包经 `ScheduleIfPossible` 进入主线程队列，而握手和状态阶段经 `HandleNow` 立即处理；任何一个给定的封包只会经过其中一条。只注入前者会漏掉握手和状态阶段 —— 而这两个阶段恰好最容易用脚本探测，所以调试时这容易被误读为「规则没有生效」。
 
-The three chunk rules hook the **assignment sites** of `ServerChunkCache`'s three callback properties, not the read sites. The reason is that those three properties are unicast and already occupied by the kernel itself when `PersistentServerLevel` is constructed (they inject save and block-entity cleanup logic); a mod assigning directly would override the kernel's copy — unloads not persisted, block entities not cleaned up, and with no error at all. Hooking the assignment site lets the kernel's callback and the probe be chained at that moment; the assignment happens only once, and each subsequent trigger adds one layer of delegate forwarding.
+三条区块规则注入的是 `ServerChunkCache` 三个回调属性的**赋值点**，不是读取点。原因是这三个属性是单播的，且在 `PersistentServerLevel` 构造时已被内核自己占用（它们注入了保存和方块实体清理逻辑）；模组直接赋值会覆盖内核的那份 —— 卸载不落盘、方块实体不清理，而且毫无报错。注入赋值点可以让内核回调和探针在那一刻串起来；赋值只发生一次，之后每次触发都多一层委托转发。
 
-`PlayerList::RespawnPlayer` is private, so the probe cannot restore the original call; that one goes through reflection (called once per death, so the overhead is negligible). This also leaves a door open for kernel alignment: if `InternalsVisibleTo` is added for it in the future, it can be swapped to a direct call.
+`PlayerList::RespawnPlayer` 是私有的，所以探针无法恢复原调用；这一条走反射（每次死亡调用一次，开销可忽略）。这也给内核对齐留了扇门：将来为它加上 `InternalsVisibleTo`，就能换成直接调用。
 
-### 5.3 Ledger
+### 5.3 账本
 
-`Internal.NcCommandRegistry` records commands registered through `args.Register`. It is only a ledger and does not take part in command execution; the commands themselves are installed on the kernel dispatcher, so even if the ledger has problems, the commands still work.
+`Internal.NcCommandRegistry` 记录通过 `args.Register` 注册的命令。它只是一个账本，不参与命令执行；命令本身装在内核派发器上，所以即便账本出问题，命令也照常工作。
 
 ***
 
-## 6. To be added
+## 6. 待补充
 
-The following are hook points whose locations are confirmed but that have not yet become events (the list was produced by `__scan_mod_api.py` at the repository root):
+以下是位置已确认但尚未做成事件的注入点（该清单由仓库根目录的 `__scan_mod_api.py` 生成）：
 
-| Direction         | Candidate hook points                                                        |
+| 方向         | 候选注入点                                                        |
 | ----------------- | ---------------------------------------------------------------------------- |
-| Entities          | `ClientLevel::AddEntity`, `Entity::Die`                                      |
-| World             | level load and unload, `ServerChunkCache` chunk batching                     |
-| Terrain generation | `ChunkGenerator::Generate` stages per `ChunkStatus`, `WorldGenRegion::SetBlockState` |
-| Command execution | `CommandSourceStack::SendSuccess` / `SendFailure` (the response half, with many call sites) |
-| Network           | per-packet-type `ServerGamePacketListenerImpl::HandleXxx` (currently only a unified entry point) |
+| 实体          | `ClientLevel::AddEntity`, `Entity::Die`                                      |
+| 世界             | 世界加载与卸载、`ServerChunkCache` 区块批处理                     |
+| 地形生成 | 按 `ChunkStatus` 分阶段的 `ChunkGenerator::Generate`、`WorldGenRegion::SetBlockState` |
+| 命令执行 | `CommandSourceStack::SendSuccess` / `SendFailure`（响应那一半，调用点很多） |
+| 网络           | 按封包类型的 `ServerGamePacketListenerImpl::HandleXxx`（目前只有统一入口） |
 
-Directions already done: level ticks became `ServerEvents.LevelTick`, saved data persistence became `ServerEvents.SavedDataSaving`, command execution became `ServerEvents.CommandExecuted`, and blocks became `ServerEvents.BlockChanged` / `BlockBroken` / `ItemDropped`.
+已完成的方向：世界 tick 变成了 `ServerEvents.LevelTick`，存档数据持久化变成了 `ServerEvents.SavedDataSaving`，命令执行变成了 `ServerEvents.CommandExecuted`，方块变成了 `ServerEvents.BlockChanged` / `BlockBroken` / `ItemDropped`。
 
-Hooking the block cell on `SetBlock` does not work: it has two default parameters, `notifyNeighbors` and `strict`, so compiled call sites take anywhere from 4 to 6 parameters, and since CallSite matches by "type + method name" without looking at the parameter list, one replacement method cannot handle all three stack shapes. Instead it hooks two places: state sync hooks `IBlockUpdateSink::BlockChanged` (the only interface call in `ServerLevel.SetBlock`, covering every change with client sync), and breaking and drops hook `ServerBlockUpdates`' own methods.
+方块这一格在 `SetBlock` 上注入行不通：它有两个默认参数 `notifyNeighbors` 和 `strict`，所以编译后的调用点会带 4 到 6 个参数不等，而 CallSite 按「类型 + 方法名」匹配、不看参数列表，一个替换方法无法应对三种栈形状。于是改为注入两个地方：状态同步注入 `IBlockUpdateSink::BlockChanged`（`ServerLevel.SetBlock` 里唯一的接口调用，覆盖每一次带客户端同步的改动），破坏和掉落注入 `ServerBlockUpdates` 自己的方法。
 
-The entities cell is troublesome because `Entity` is defined in `NetCraft.Registry`, which is not on the injection list, so call sites that target it cannot be rewritten. `ClientLevel::AddEntity` is in the client assembly and is doable; a death event first requires resolving whether `Registry` can be rewritten.
+实体这一格比较麻烦，因为 `Entity` 定义在 `NetCraft.Registry` 中，而它不在注入名单上，所以以它为目标的调用点无法被改写。`ClientLevel::AddEntity` 在客户端程序集里，可行；死亡事件则需要先解决 `Registry` 能否被改写。
 
-For the network cell, `HandleChat` has long existed and `NetworkEvents.PacketReceived` provides a unified entry point, so per-`HandleXxx` hooks are much less valuable; only scenarios needing fine-grained filtering by packet type are worth adding.
+网络这一格方面，`HandleChat` 早已存在，`NetworkEvents.PacketReceived` 也提供了统一入口，所以按 `HandleXxx` 逐个注入的价值低得多；只有需要按封包类型细粒度过滤的场景才值得增加。
 
-Level load and unload have no convergence point on the NC side: `DedicatedServer::CreateLevel` is private, so the original call can only be restored by reflection like `PlayerList::RespawnPlayer`; the unload path is even more scattered. To do it, first settle what the event args should be.
+世界加载与卸载在 NC 这侧没有汇聚点：`DedicatedServer::CreateLevel` 是私有的，只能像 `PlayerList::RespawnPlayer` 那样用反射恢复原调用；卸载路径更加分散。要做的话，先想清楚事件 args 应该是什么。
 
-All of the remaining ones need object references (entity instances, etc.), so they must use `CallSite` rather than `Mark`; if a kernel value type appears among the parameters, it can only be written into the replacement method's signature as itself.
+剩下这些都需要对象引用（实体实例等），所以必须用 `CallSite` 而不是 `Mark`；如果参数中出现内核值类型，只能以它本身写进替换方法的签名。
 
-The interface-surface list (`__modapi_api.txt`, produced by `__scan_mod_api.py --api`) was also reviewed: entries qualified as capability entry points were gathered into the chapter 4 facades by domain, and the rest that are not exposed fall into three categories — protocol and packet handling (`Network.Protocol.*`), rendering and models (`Client.Render.*`), and terrain generation and density functions (`LevelGen.*`). These are kernel internals; using them directly would tie mods to implementation details, so a stable interface should first be opened in the kernel.
+接口表面清单（`__modapi_api.txt`，由 `__scan_mod_api.py --api` 生成）也审查过了：够得上能力入口的条目已按领域归入第 4 章的门面，其余未暴露的分为三类 —— 协议与封包处理（`Network.Protocol.*`）、渲染与模型（`Client.Render.*`）、地形生成与密度函数（`LevelGen.*`）。这些属于内核内部；直接使用会把模组绑死在实现细节上，所以应先在核心里开出稳定接口。
 
-On the server side there are two more things not wrapped as facades: the `ReloadableServerResources` instance hangs off `DedicatedServer`, and since ModApi does not reference `NetCraft.Server`, wrapping it requires first opening a property on the kernel base class; `ChunkSender` and `ServerWorldBorderListener` are internal flows with no use case for mods.
+服务端侧还有两样没有包装成门面：`ReloadableServerResources` 实例挂在 `DedicatedServer` 上，而 ModApi 不引用 `NetCraft.Server`，要包装它得先在内核基类上开一个属性；`ChunkSender` 和 `ServerWorldBorderListener` 是内部流程，模组没有使用场景。

@@ -1,46 +1,46 @@
-# NetCraft mod template
+# Шаблон мода NetCraft
 
-Sample code for NetCraft mod development. Every entry in `NetCraftTemplate.yaml`
-points at one file under `examples/`, and `ncm template` pulls them on demand.
+Примеры кода для разработки модов NetCraft. Каждая запись в `NetCraftTemplate.yaml`
+указывает на один файл в каталоге `examples/`, а `ncm template` извлекает их по запросу.
 
-## Usage
+## Использование
 
 ```
-ncm template view              list every entry
-ncm template view Wrapper.?    filter by id, ? and * are wildcards
-ncm template example <api id>  pull one example file into the current directory
+ncm template view              вывести список всех записей
+ncm template view Wrapper.?    фильтровать по id; ? и * — подстановочные знаки
+ncm template example <api id>  извлечь один файл-пример в текущий каталог
 ```
 
-## The two routes
+## Два маршрута
 
-`NetCraft.ModApi` exposes two namespaces, pick the one that fits:
+`NetCraft.ModApi` предоставляет два пространства имён, выберите подходящее:
 
-| Namespace | What you get |
+| Пространство имён | Что вы получаете |
 | --- | --- |
-| `NetCraft.ModApi.Wrapper` | Events, `Nc*` facades and `Nc*` handles. No kernel type shows up in the public surface, so a kernel rename does not force a rebuild of your mod. |
-| `NetCraft.ModApi.Extension` | `[Inject]` and `[Mixin]` attributes. Rules name kernel types and methods directly, which is more powerful and more fragile. |
+| `NetCraft.ModApi.Wrapper` | События, фасады `Nc*` и дескрипторы `Nc*`. В публичной поверхности не появляется ни один тип ядра, поэтому переименование в ядре не вынуждает пересобирать ваш мод. |
+| `NetCraft.ModApi.Extension` | Атрибуты `[Inject]` и `[Mixin]`. Правила напрямую указывают типы и методы ядра, что мощнее, но и хрупче. |
 
-## Common calls
+## Частые вызовы
 
-Open this panel from inside a mod project and every call below that your code
-actually uses is graded against `NetCraftTemplate.yaml`: green when the member
-is declared, amber when the member is not, red when the type is not declared
-at all. Hover a highlighted name to see the reason.
+Откройте эту панель из проекта мода, и каждый приведённый ниже вызов, который реально
+используется в вашем коде, будет сопоставлен с `NetCraftTemplate.yaml`: зелёный, когда член
+объявлен, жёлтый, когда члена нет, красный, когда тип вообще не объявлен.
+Наведите курсор на подсвеченное имя, чтобы увидеть причину.
 
-| Call | What it does |
+| Вызов | Что делает |
 | --- | --- |
-| `NcServer.IsAvailable` | whether the server is up and captured |
-| `NcServer.Broadcast` | system message to everyone online |
-| `NcServer.Execute` | run a command as the console |
-| `NcWorld.GetBlock` | read one block, null when the chunk is unloaded |
-| `NcWorld.SetBlock` | write one block, runs the full update chain |
-| `NcWorld.BreakBlock` | break a block the way a player would |
-| `NcPlayer.Name` | the player name |
-| `NcPlayer.Health` | current health |
-| `NcPlayers.Find` | look up an online player by name |
-| `NcPlayers.Send` | private system message |
-| `NcRegistries.FindState` | block state by namespaced id |
-| `NcRegistries.FindItem` | item by namespaced id |
-| `ServerEvents.Tick` | runs every server tick |
-| `ServerEvents.PlayerJoin` | a player finished joining |
-| `ServerEvents.BlockBroken` | a block was actually replaced |
+| `NcServer.IsAvailable` | запущен ли сервер и захвачен ли он |
+| `NcServer.Broadcast` | системное сообщение всем, кто онлайн |
+| `NcServer.Execute` | выполнить команду от имени консоли |
+| `NcWorld.GetBlock` | прочитать один блок; null, если чанк не загружен |
+| `NcWorld.SetBlock` | записать один блок; запускает всю цепочку обновлений |
+| `NcWorld.BreakBlock` | сломать блок так, как это сделал бы игрок |
+| `NcPlayer.Name` | имя игрока |
+| `NcPlayer.Health` | текущее здоровье |
+| `NcPlayers.Find` | найти игрока онлайн по имени |
+| `NcPlayers.Send` | личное системное сообщение |
+| `NcRegistries.FindState` | состояние блока по id с пространством имён |
+| `NcRegistries.FindItem` | предмет по id с пространством имён |
+| `ServerEvents.Tick` | выполняется каждый тик сервера |
+| `ServerEvents.PlayerJoin` | игрок завершил вход |
+| `ServerEvents.BlockBroken` | блок действительно был заменён |

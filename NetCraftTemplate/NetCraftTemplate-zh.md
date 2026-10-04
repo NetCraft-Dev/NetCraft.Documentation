@@ -1,46 +1,45 @@
-# NetCraft mod template
+# NetCraft 模组模板
 
-Sample code for NetCraft mod development. Every entry in `NetCraftTemplate.yaml`
-points at one file under `examples/`, and `ncm template` pulls them on demand.
+NetCraft 模组开发的示例代码。`NetCraftTemplate.yaml` 中的每个条目都指向
+`examples/` 下的一个文件，`ncm template` 按需拉取。
 
-## Usage
+## 用法
 
 ```
-ncm template view              list every entry
-ncm template view Wrapper.?    filter by id, ? and * are wildcards
-ncm template example <api id>  pull one example file into the current directory
+ncm template view              列出所有条目
+ncm template view Wrapper.?    按 id 过滤，? 和 * 是通配符
+ncm template example <api id>  拉取一个示例文件到当前目录
 ```
 
-## The two routes
+## 两条路线
 
-`NetCraft.ModApi` exposes two namespaces, pick the one that fits:
+`NetCraft.ModApi` 暴露两个命名空间，挑合适的那个：
 
-| Namespace | What you get |
+| 命名空间 | 你能得到什么 |
 | --- | --- |
-| `NetCraft.ModApi.Wrapper` | Events, `Nc*` facades and `Nc*` handles. No kernel type shows up in the public surface, so a kernel rename does not force a rebuild of your mod. |
-| `NetCraft.ModApi.Extension` | `[Inject]` and `[Mixin]` attributes. Rules name kernel types and methods directly, which is more powerful and more fragile. |
+| `NetCraft.ModApi.Wrapper` | 事件、`Nc*` 门面和 `Nc*` 句柄。公共表面上不出现任何内核类型，因此内核改名不会迫使你重新构建模组。 |
+| `NetCraft.ModApi.Extension` | `[Inject]` 和 `[Mixin]` 特性。规则直接写出内核类型和方法名，功能更强也更脆弱。 |
 
-## Common calls
+## 常用调用
 
-Open this panel from inside a mod project and every call below that your code
-actually uses is graded against `NetCraftTemplate.yaml`: green when the member
-is declared, amber when the member is not, red when the type is not declared
-at all. Hover a highlighted name to see the reason.
+在模组项目内打开这个面板，下面每一个你的代码实际用到的调用都会
+对照 `NetCraftTemplate.yaml` 评级：成员已声明为绿色，成员不存在为琥珀色，
+类型完全未声明为红色。悬停在高亮的名称上可查看原因。
 
-| Call | What it does |
+| 调用 | 作用 |
 | --- | --- |
-| `NcServer.IsAvailable` | whether the server is up and captured |
-| `NcServer.Broadcast` | system message to everyone online |
-| `NcServer.Execute` | run a command as the console |
-| `NcWorld.GetBlock` | read one block, null when the chunk is unloaded |
-| `NcWorld.SetBlock` | write one block, runs the full update chain |
-| `NcWorld.BreakBlock` | break a block the way a player would |
-| `NcPlayer.Name` | the player name |
-| `NcPlayer.Health` | current health |
-| `NcPlayers.Find` | look up an online player by name |
-| `NcPlayers.Send` | private system message |
-| `NcRegistries.FindState` | block state by namespaced id |
-| `NcRegistries.FindItem` | item by namespaced id |
-| `ServerEvents.Tick` | runs every server tick |
-| `ServerEvents.PlayerJoin` | a player finished joining |
-| `ServerEvents.BlockBroken` | a block was actually replaced |
+| `NcServer.IsAvailable` | 服务器是否已启动并捕获 |
+| `NcServer.Broadcast` | 向所有在线玩家发送系统消息 |
+| `NcServer.Execute` | 以控制台身份执行一条命令 |
+| `NcWorld.GetBlock` | 读取一个方块，区块未加载时返回 null |
+| `NcWorld.SetBlock` | 写入一个方块，走完整的更新链 |
+| `NcWorld.BreakBlock` | 像玩家那样破坏一个方块 |
+| `NcPlayer.Name` | 玩家名 |
+| `NcPlayer.Health` | 当前生命值 |
+| `NcPlayers.Find` | 按名字查找在线玩家 |
+| `NcPlayers.Send` | 私发系统消息 |
+| `NcRegistries.FindState` | 按命名空间 id 获取方块状态 |
+| `NcRegistries.FindItem` | 按命名空间 id 获取物品 |
+| `ServerEvents.Tick` | 每个服务端 tick 运行 |
+| `ServerEvents.PlayerJoin` | 一名玩家完成加入 |
+| `ServerEvents.BlockBroken` | 一个方块被实际替换 |
